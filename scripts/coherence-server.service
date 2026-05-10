@@ -1,0 +1,17 @@
+[Unit]
+Description=Coherence doc/comment server
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Environment=COHERENCE_HOME=COHERENCE_HOME_PLACEHOLDER
+EnvironmentFile=-COHERENCE_HOME_PLACEHOLDER/.env
+ExecStart=COHERENCE_HOME_PLACEHOLDER/bin/coherence-server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
