@@ -217,7 +217,7 @@ func regenerateFolderIndex(cfg *Config, folderPath string) {
 		title := docTitle(doc.Path, doc.Name())
 		cards = append(cards, fmt.Sprintf(
 			"    <div class=\"doc-card-wrap\">\n"+
-				"      <a href=\"%s\" class=\"doc-card\" data-name=\"%s\" data-mtime=\"%d\">\n"+
+				"      <a href=\"/%s/%s\" class=\"doc-card\" data-name=\"%s\" data-mtime=\"%d\">\n"+
 				"        <div class=\"doc-card-icon\">&#x1F4C4;</div>\n"+
 				"        <div class=\"doc-card-body\">\n"+
 				"          <div class=\"doc-card-title\">%s</div>\n"+
@@ -232,7 +232,7 @@ func regenerateFolderIndex(cfg *Config, folderPath string) {
 				"      <button class=\"doc-move-btn\" data-folder=\"%s\" data-file=\"%s\" title=\"Move this document\">&#x2197;</button>\n"+
 				"      <button class=\"doc-delete-btn\" data-folder=\"%s\" data-file=\"%s\" title=\"Delete this document\">&#x1F5D1;</button>\n"+
 				"    </div>",
-			doc.Name(), strings.TrimSuffix(doc.Name(), ".html"), doc.Mtime*1000,
+			relFolder, doc.Name(), strings.TrimSuffix(doc.Name(), ".html"), doc.Mtime*1000,
 			title, doc.Name(), mtime,
 			relFolder, strings.TrimSuffix(doc.Name(), ".html"),
 			relFolder, strings.TrimSuffix(doc.Name(), ".html"),
