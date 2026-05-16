@@ -23,6 +23,14 @@ import (
 
 const sessionTTL = 86400 * 15 // 15 days
 const maxUploadBytes = 50 * 1024 * 1024
+const maxImageBytes = 10 * 1024 * 1024
+
+var allowedImageTypes = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+}
 
 // Handler holds shared server state.
 type Handler struct {
@@ -116,6 +124,8 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleUpdateDoc(w, r)
 		case "/upload-file":
 			h.handleUploadFile(w, r)
+		case "/upload-image":
+			h.handleUploadImage(w, r)
 		default:
 			sendJSON(w, 404, map[string]any{"error": "not found"})
 		}
@@ -995,6 +1005,79 @@ func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	rel, _ := filepath.Rel(dataDirAbs, destFile)
 	go docgen.ReindexAll(h.dgCfg)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": rel, "size": len(data)})
+}
+
+func (h *Handler) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	ct := r.Header.Get("Content-Type")
+	if !strings.Contains(ct, "multipart/form-data") {
+		sendJSON(w, 400, map[string]any{"error": "multipart/form-data required"})
+		return
+	}
+	if r.ContentLength > maxImageBytes {
+		sendJSON(w, 413, map[string]any{"error": "image too large (max 10MB)"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageBytes)
+	if err := r.ParseMultipartForm(maxImageBytes); err != nil {
+		sendJSON(w, 400, map[string]any{"error": "parse error: " + err.Error()})
+		return
+	}
+	folder := strings.TrimSpace(r.FormValue("folder"))
+	if folder == "" {
+		sendJSON(w, 400, map[string]any{"error": "folder required"})
+		return
+	}
+	fp := safeFolderPath(h.cfg.DataDir, folder)
+	if fp == "" {
+		sendJSON(w, 400, map[string]any{"error": "invalid folder"})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		sendJSON(w, 400, map[string]any{"error": "no file provided"})
+		return
+	}
+	defer file.Close()
+
+	data, _ := io.ReadAll(file)
+
+	detectedMIME := http.DetectContentType(data)
+	ext, ok := allowedImageTypes[detectedMIME]
+	if !ok {
+		sendJSON(w, 400, map[string]any{"error": "file must be a PNG, JPEG, GIF, or WebP image"})
+		return
+	}
+
+	origBase := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
+	base := sanitizeNameRe.ReplaceAllString(origBase, "_")
+	if base == "" {
+		base = "image"
+	}
+	destName := fmt.Sprintf("%d-%s%s", time.Now().UnixMilli(), base, ext)
+
+	imagesDir := filepath.Join(fp, "images")
+	if err := os.MkdirAll(imagesDir, 0755); err != nil {
+		sendJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	os.Chmod(imagesDir, 0755)
+	os.Chmod(fp, 0755)
+
+	destFile := filepath.Join(imagesDir, destName)
+	if err := os.WriteFile(destFile, data, 0644); err != nil {
+		sendJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+
+	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
+	rel, _ := filepath.Rel(dataDirAbs, destFile)
+	urlPath := "/" + filepath.ToSlash(rel)
+	sendJSON(w, 200, map[string]any{
+		"ok":       true,
+		"path":     urlPath,
+		"markdown": fmt.Sprintf("![image](%s)", urlPath),
+		"size":     len(data),
+	})
 }
 
 // ── auth ───────────────────────────────────────────────────────────────────

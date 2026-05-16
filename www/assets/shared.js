@@ -342,13 +342,16 @@ async function openUploadModal(defaultFolder) {
     <div class="modal-box">
       <div class="modal-title">Upload File</div>
       <div class="modal-field" id="up-folder-field">
-        <label class="modal-label">Location <span class="modal-hint">(saved to folder/logs/)</span></label>
+        <label class="modal-label">Location <span class="modal-hint" id="up-location-hint">(saved to folder/logs/)</span></label>
       </div>
       <div class="modal-field">
         <label class="modal-label">File</label>
         <input id="up-file" type="file" class="modal-input" style="padding:4px">
       </div>
-      <div class="modal-field">
+      <div id="up-preview-field" style="display:none;margin-bottom:8px">
+        <img id="up-preview-img" style="max-width:100%;max-height:180px;object-fit:contain;border-radius:4px;border:1px solid var(--border);display:block">
+      </div>
+      <div class="modal-field" id="up-rename-field">
         <label class="modal-label">Rename to <span class="modal-hint">(optional)</span></label>
         <input id="up-rename" class="modal-input" placeholder="leave blank to keep original name">
       </div>
@@ -356,6 +359,13 @@ async function openUploadModal(defaultFolder) {
         <div class="modal-progress-bar" id="up-progress-bar"></div>
       </div>
       <div class="modal-status" id="up-status"></div>
+      <div id="up-markdown-result" style="display:none;margin-top:8px">
+        <label class="modal-label">Markdown to embed in doc</label>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <input id="up-markdown-input" class="modal-input" readonly style="font-family:var(--font-mono);font-size:12px">
+          <button class="modal-btn-primary" id="up-markdown-copy" style="flex-shrink:0">Copy</button>
+        </div>
+      </div>
       <div class="modal-actions">
         <button class="modal-btn-cancel" id="up-cancel">Cancel</button>
         <button class="modal-btn-primary" id="up-upload">Upload</button>
@@ -364,18 +374,52 @@ async function openUploadModal(defaultFolder) {
 
   overlay.querySelector("#up-folder-field").appendChild(picker);
 
-  const fileEl    = overlay.querySelector("#up-file");
-  const renameEl  = overlay.querySelector("#up-rename");
-  const status    = overlay.querySelector("#up-status");
-  const progWrap  = overlay.querySelector("#up-progress");
-  const progBar   = overlay.querySelector("#up-progress-bar");
-  const uploadBtn = overlay.querySelector("#up-upload");
+  const fileEl        = overlay.querySelector("#up-file");
+  const renameEl      = overlay.querySelector("#up-rename");
+  const renameField   = overlay.querySelector("#up-rename-field");
+  const previewField  = overlay.querySelector("#up-preview-field");
+  const previewImg    = overlay.querySelector("#up-preview-img");
+  const locationHint  = overlay.querySelector("#up-location-hint");
+  const status        = overlay.querySelector("#up-status");
+  const progWrap      = overlay.querySelector("#up-progress");
+  const progBar       = overlay.querySelector("#up-progress-bar");
+  const uploadBtn     = overlay.querySelector("#up-upload");
+  const markdownResult = overlay.querySelector("#up-markdown-result");
+  const markdownInput  = overlay.querySelector("#up-markdown-input");
+  const markdownCopy   = overlay.querySelector("#up-markdown-copy");
 
   overlay.querySelector("#up-cancel").addEventListener("click", () => overlay.remove());
 
+  fileEl.addEventListener("change", () => {
+    const file = fileEl.files[0];
+    if (file && file.type.startsWith("image/")) {
+      const url = URL.createObjectURL(file);
+      previewImg.src = url;
+      previewField.style.display = "";
+      renameField.style.display = "none";
+      locationHint.textContent = "(saved to folder/images/)";
+    } else {
+      previewField.style.display = "none";
+      renameField.style.display = "";
+      locationHint.textContent = "(saved to folder/logs/)";
+    }
+    markdownResult.style.display = "none";
+  });
+
+  markdownCopy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(markdownInput.value);
+      markdownCopy.textContent = "Copied!";
+      setTimeout(() => { markdownCopy.textContent = "Copy"; }, 2000);
+    } catch(e) {
+      markdownInput.select();
+    }
+  });
+
   uploadBtn.addEventListener("click", async () => {
-    const folder = picker.getFolder();
-    const file   = fileEl.files[0];
+    const folder   = picker.getFolder();
+    const file     = fileEl.files[0];
+    const isImage  = file && file.type.startsWith("image/");
     if (!folder) { status.textContent = "Please select a folder."; status.className = "modal-status err"; return; }
     if (!file)   { status.textContent = "Choose a file to upload."; status.className = "modal-status err"; return; }
 
@@ -384,11 +428,14 @@ async function openUploadModal(defaultFolder) {
     progBar.style.width    = "0%";
     status.textContent     = "Uploading…";
     status.className       = "modal-status";
+    markdownResult.style.display = "none";
 
     const form = new FormData();
     form.append("folder", folder);
     form.append("file", file);
-    if (renameEl.value.trim()) form.append("rename", renameEl.value.trim());
+    if (!isImage && renameEl.value.trim()) form.append("rename", renameEl.value.trim());
+
+    const endpoint = isImage ? "/upload-image" : "/upload-file";
 
     try {
       await new Promise((resolve, reject) => {
@@ -401,10 +448,18 @@ async function openUploadModal(defaultFolder) {
           if (xhr.status >= 200 && xhr.status < 300) {
             try {
               const d = JSON.parse(xhr.responseText);
-              status.textContent = "Uploaded: " + (d.path || file.name);
-              status.className   = "modal-status ok";
               progBar.style.width = "100%";
-              setTimeout(() => overlay.remove(), 1500);
+              if (isImage && d.markdown) {
+                status.textContent = "Uploaded.";
+                status.className   = "modal-status ok";
+                markdownInput.value = d.markdown;
+                markdownResult.style.display = "";
+                uploadBtn.disabled = false;
+              } else {
+                status.textContent = "Uploaded: " + (d.path || file.name);
+                status.className   = "modal-status ok";
+                setTimeout(() => overlay.remove(), 1500);
+              }
             } catch(e) {}
             resolve();
           } else {
@@ -413,7 +468,7 @@ async function openUploadModal(defaultFolder) {
           }
         });
         xhr.addEventListener("error", () => reject(new Error("Network error")));
-        xhr.open("POST", _API + "/upload-file");
+        xhr.open("POST", _API + endpoint);
         xhr.send(form);
       });
     } catch(e) {
@@ -515,6 +570,33 @@ function initEditMode() {
         contentEl.selectionStart = contentEl.selectionEnd = s + 2;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveBtn.click(); }
+    });
+
+    contentEl.addEventListener("paste", async (e) => {
+      const items = Array.from(e.clipboardData?.items || []);
+      const imgItem = items.find(i => i.type.startsWith("image/"));
+      if (!imgItem) return;
+      e.preventDefault();
+      const file = imgItem.getAsFile();
+      if (!file) return;
+      const ext = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      const fname = `paste-${Date.now()}.${ext}`;
+      const placeholder = "![uploading…]()";
+      const sel = contentEl.selectionStart;
+      contentEl.value = contentEl.value.slice(0, sel) + placeholder + contentEl.value.slice(contentEl.selectionEnd);
+      contentEl.selectionStart = contentEl.selectionEnd = sel + placeholder.length;
+      const form = new FormData();
+      form.append("folder", folder);
+      form.append("file", new File([file], fname, { type: file.type }));
+      try {
+        const r = await fetch(_API + "/upload-image", { method: "POST", body: form });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "upload failed");
+        contentEl.value = contentEl.value.replace(placeholder, d.markdown);
+      } catch(err) {
+        contentEl.value = contentEl.value.replace(placeholder, "");
+        alert("Image upload failed: " + err.message);
+      }
     });
 
     setTimeout(() => contentEl.focus(), 50);

@@ -30,12 +30,11 @@ Every plan, analysis, fix-summary, and log file belongs in a specific `~/.cohere
 |---|---|
 | Jira bug fix or feature (repo A) | `repo-a/PROJ-XXXXX` |
 | Jira bug fix or feature (repo B) | `repo-b/PROJ-XXXXX` |
-| AI tooling / infrastructure improvement | `ai-system` — Claude config, hooks, scripts, MCP tools, doc infra, agent files, skill updates, settings.json |
 | Investigation / topic work (no Jira) | Descriptive topic slug at root (e.g. `perf-analysis`, `auth-refactor`) |
 
 **Rules:**
 - **Never use a synthetic placeholder as a `--folder` argument** — always use a real ticket ID or a descriptive slug.
-- **No synthetic catch-alls** — if there is no Jira, use `ai-system` for tooling work or a descriptive topic slug for investigations.
+- **No synthetic catch-alls** — if there is no Jira, use a descriptive topic slug for investigations.
 - **Jira pages should show the Jira description** — always include the ticket title and URL in any doc generated for a Jira folder.
 - **Always use the comment server move/rename API** (`POST /move-folder`, `POST /rename-folder`) to move or rename doc folders — never use `cp -r` or `mv` directly. The server automatically rewrites internal cross-doc links and `window.DOC_FOLDER` inside every HTML file after the move, then reindexes.
 - **Never use `cp -r` to duplicate a folder** — copied files inherit `600` permissions and will 404 in the browser (nginx cannot read them), and internal links will be stale. Use the API instead.
@@ -44,9 +43,6 @@ Examples:
 ```bash
 # Jira fix in repo-a
 "${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate --folder "repo-a/PROJ-123" --filename "plan.html" ...
-
-# AI tooling work (no Jira)
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate --folder "ai-system" --filename "plan-docs-consolidation.html" ...
 
 # Investigation / topic work with a descriptive slug
 "${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate --folder "perf-analysis" --filename "analysis.html" ...
@@ -158,6 +154,23 @@ When investigating issues (no code change needed yet), **stop after identifying 
 
 > "Analysis doc ready: <DOC_BASE_URL>/<folder>/analysis.html
 > Review it, add comments on anything that looks wrong, then reply here to proceed."
+
+---
+
+## Image Preservation Rule
+
+**Before regenerating or updating any doc that may already contain images:**
+
+1. Extract the current raw markdown from the doc:
+   ```bash
+   sed -n '/<script[^>]*id="doc-raw-markdown"/,/<\/script>/p' \
+     ~/.coherence/data/<folder>/<filename>.html | sed '1d;$d'
+   ```
+2. Note any `![alt](url)` image references present
+3. When writing new content, **preserve all image references exactly** — same alt text, same URL path
+4. When writing content to a temp file (`--content-file`), verify the file contains all image markdown before running `coherence-doc generate`
+
+Never omit or rewrite image paths. Images are stored at fixed URLs; a changed path breaks them permanently until re-uploaded.
 
 ---
 
