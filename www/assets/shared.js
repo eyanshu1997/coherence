@@ -479,7 +479,7 @@ async function openUploadModal(defaultFolder) {
   });
 }
 
-// ── Edit mode (doc pages) ──────────────────────────────────────────────────
+// ── Edit mode (doc pages) — full-screen in-place editor ───────────────────
 function initEditMode() {
   const editBtn = document.getElementById("edit-doc-btn");
   if (!editBtn) return;
@@ -488,11 +488,24 @@ function initEditMode() {
   const filename = window.DOC_FILE;
   if (!folder || !filename) { editBtn.style.display = "none"; return; }
 
-  let editOverlay = null;
+  let isEditing  = false;
+  let escHandler = null;
+
+  function exitEditMode() {
+    document.body.classList.remove("doc-edit-mode");
+    const pane     = document.getElementById("doc-editor-pane");
+    const controls = document.getElementById("edit-header-controls");
+    if (pane)     pane.remove();
+    if (controls) controls.remove();
+    if (escHandler) { document.removeEventListener("keydown", escHandler); escHandler = null; }
+    isEditing = false;
+  }
 
   editBtn.addEventListener("click", async () => {
-    if (editOverlay) { editOverlay.remove(); editOverlay = null; return; }
+    if (isEditing) { exitEditMode(); return; }
+    isEditing = true;
 
+    // Read raw markdown from embedded script tag
     let rawMarkdown = "";
     const rawEl = document.getElementById("doc-raw-markdown");
     if (rawEl) {
@@ -506,41 +519,88 @@ function initEditMode() {
       } catch(e) { rawMarkdown = ""; }
     }
 
-    editOverlay = createOverlay("edit-doc-overlay");
-    editOverlay.innerHTML = `
-      <div class="modal-box modal-box-wide">
-        <div class="modal-title">Edit — ${escHtmlAttr(filename)}</div>
-        <div class="modal-field">
-          <label class="modal-label">Title</label>
-          <input id="ed-title" class="modal-input" value="${escHtmlAttr(window.DOC_TITLE || "")}">
-        </div>
-        <div class="modal-field" style="flex:1;display:flex;flex-direction:column">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-            <label class="modal-label" style="margin-bottom:0">Content <span class="modal-hint">${rawEl ? "(markdown)" : "(HTML)"}</span></label>
-            <button id="ed-insert-img" style="font-size:12px;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text3);cursor:pointer;font-family:var(--font)">&#x1F4F7; Insert Image</button>
-          </div>
+    // Enter full-screen edit mode
+    document.body.classList.add("doc-edit-mode");
+
+    // Inject editor pane directly into the page (not a modal overlay)
+    const page = document.querySelector(".page") || document.body;
+    const pane = document.createElement("div");
+    pane.id = "doc-editor-pane";
+    pane.innerHTML = `
+      <input id="ed-title" class="ed-title-input" value="${escHtmlAttr(window.DOC_TITLE || "")}" placeholder="Document title">
+      <div class="editor-toolbar">
+        <span class="editor-toolbar-label">Content <span class="editor-toolbar-hint">(markdown)</span></span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="ed-insert-img" class="ed-toolbar-btn">&#x1F4F7; Insert Image</button>
           <input id="ed-img-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
-          <textarea id="ed-content" class="modal-textarea modal-textarea-tall">${escHtmlContent(rawMarkdown)}</textarea>
         </div>
-        <div class="modal-status" id="ed-status"></div>
-        <div class="modal-actions">
-          <button class="modal-btn-cancel" id="ed-cancel">Cancel</button>
-          <button class="modal-btn-primary" id="ed-save">Save</button>
-        </div>
-      </div>`;
+      </div>
+      <textarea id="ed-content" class="ed-content-area" spellcheck="false">${escHtmlContent(rawMarkdown)}</textarea>`;
+    page.appendChild(pane);
 
-    const titleEl      = editOverlay.querySelector("#ed-title");
-    const contentEl    = editOverlay.querySelector("#ed-content");
-    const status       = editOverlay.querySelector("#ed-status");
-    const saveBtn      = editOverlay.querySelector("#ed-save");
-    const insertImgBtn = editOverlay.querySelector("#ed-insert-img");
-    const imgFileInput = editOverlay.querySelector("#ed-img-file");
+    // Inject Save / Cancel controls into the sticky header
+    const header = document.querySelector(".site-header");
+    const controls = document.createElement("div");
+    controls.id = "edit-header-controls";
+    controls.innerHTML = `
+      <span id="ed-status" class="ed-header-status"></span>
+      <button id="ed-cancel" class="ed-header-cancel">Cancel</button>
+      <button id="ed-save" class="ed-header-save">Save</button>`;
+    if (header) header.appendChild(controls);
 
+    const titleEl      = pane.querySelector("#ed-title");
+    const contentEl    = pane.querySelector("#ed-content");
+    const insertImgBtn = pane.querySelector("#ed-insert-img");
+    const imgFileInput = pane.querySelector("#ed-img-file");
+    const saveBtn      = controls.querySelector("#ed-save");
+    const cancelBtn    = controls.querySelector("#ed-cancel");
+    const statusEl     = controls.querySelector("#ed-status");
+
+    // Cancel
+    cancelBtn.addEventListener("click", exitEditMode);
+
+    // Escape to cancel
+    escHandler = (e) => { if (e.key === "Escape") { e.stopPropagation(); exitEditMode(); } };
+    document.addEventListener("keydown", escHandler);
+
+    // Save
+    async function doSave() {
+      const title   = titleEl.value.trim();
+      const content = contentEl.value;
+      saveBtn.disabled     = true;
+      statusEl.textContent = "Saving…";
+      statusEl.className   = "ed-header-status";
+      try {
+        const r = await fetch(_API + "/update-doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder, filename, title, content }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          statusEl.textContent = d.error || "Save failed";
+          statusEl.className   = "ed-header-status err";
+          saveBtn.disabled     = false;
+          return;
+        }
+        statusEl.textContent = "Saved — reloading…";
+        statusEl.className   = "ed-header-status ok";
+        setTimeout(() => window.location.reload(), 800);
+      } catch(e) {
+        statusEl.textContent = "Error: " + e.message;
+        statusEl.className   = "ed-header-status err";
+        saveBtn.disabled     = false;
+      }
+    }
+
+    saveBtn.addEventListener("click", doSave);
+
+    // Insert Image button → hidden file picker
     insertImgBtn.addEventListener("click", () => imgFileInput.click());
     imgFileInput.addEventListener("change", async () => {
       const file = imgFileInput.files[0];
       if (!file) return;
-      insertImgBtn.disabled = true;
+      insertImgBtn.disabled    = true;
       insertImgBtn.textContent = "Uploading…";
       const form = new FormData();
       form.append("folder", folder);
@@ -556,44 +616,13 @@ function initEditMode() {
       } catch(err) {
         alert("Image upload failed: " + err.message);
       } finally {
-        insertImgBtn.disabled = false;
+        insertImgBtn.disabled    = false;
         insertImgBtn.textContent = "📷 Insert Image";
-        imgFileInput.value = "";
+        imgFileInput.value       = "";
       }
     });
 
-    editOverlay.querySelector("#ed-cancel").addEventListener("click", () => { editOverlay.remove(); editOverlay = null; });
-    editOverlay.addEventListener("click", (e) => { if (e.target === editOverlay) { editOverlay.remove(); editOverlay = null; } });
-
-    saveBtn.addEventListener("click", async () => {
-      const title   = titleEl.value.trim();
-      const content = contentEl.value;
-      saveBtn.disabled   = true;
-      status.textContent = "Saving…";
-      status.className   = "modal-status";
-      try {
-        const r = await fetch(_API + "/update-doc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ folder, filename, title, content }),
-        });
-        const d = await r.json();
-        if (!r.ok) {
-          status.textContent = d.error || "Save failed";
-          status.className   = "modal-status err";
-          saveBtn.disabled   = false;
-          return;
-        }
-        status.textContent = "Saved — reloading…";
-        status.className   = "modal-status ok";
-        setTimeout(() => window.location.reload(), 800);
-      } catch(e) {
-        status.textContent = "Error: " + e.message;
-        status.className   = "modal-status err";
-        saveBtn.disabled   = false;
-      }
-    });
-
+    // Tab → 2 spaces; Ctrl/Cmd+S → save
     contentEl.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
@@ -601,17 +630,18 @@ function initEditMode() {
         contentEl.value = contentEl.value.slice(0, s) + "  " + contentEl.value.slice(contentEl.selectionEnd);
         contentEl.selectionStart = contentEl.selectionEnd = s + 2;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveBtn.click(); }
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); doSave(); }
     });
 
+    // Paste image → upload inline
     contentEl.addEventListener("paste", async (e) => {
-      const items = Array.from(e.clipboardData?.items || []);
+      const items   = Array.from(e.clipboardData?.items || []);
       const imgItem = items.find(i => i.type.startsWith("image/"));
       if (!imgItem) return;
       e.preventDefault();
       const file = imgItem.getAsFile();
       if (!file) return;
-      const ext = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      const ext   = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
       const fname = `paste-${Date.now()}.${ext}`;
       const placeholder = "![uploading…]()";
       const sel = contentEl.selectionStart;
