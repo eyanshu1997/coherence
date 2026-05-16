@@ -515,7 +515,11 @@ function initEditMode() {
           <input id="ed-title" class="modal-input" value="${escHtmlAttr(window.DOC_TITLE || "")}">
         </div>
         <div class="modal-field" style="flex:1;display:flex;flex-direction:column">
-          <label class="modal-label">Content <span class="modal-hint">${rawEl ? "(markdown)" : "(HTML)"}</span></label>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <label class="modal-label" style="margin-bottom:0">Content <span class="modal-hint">${rawEl ? "(markdown)" : "(HTML)"}</span></label>
+            <button id="ed-insert-img" style="font-size:12px;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text3);cursor:pointer;font-family:var(--font)">&#x1F4F7; Insert Image</button>
+          </div>
+          <input id="ed-img-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
           <textarea id="ed-content" class="modal-textarea modal-textarea-tall">${escHtmlContent(rawMarkdown)}</textarea>
         </div>
         <div class="modal-status" id="ed-status"></div>
@@ -525,10 +529,38 @@ function initEditMode() {
         </div>
       </div>`;
 
-    const titleEl   = editOverlay.querySelector("#ed-title");
-    const contentEl = editOverlay.querySelector("#ed-content");
-    const status    = editOverlay.querySelector("#ed-status");
-    const saveBtn   = editOverlay.querySelector("#ed-save");
+    const titleEl      = editOverlay.querySelector("#ed-title");
+    const contentEl    = editOverlay.querySelector("#ed-content");
+    const status       = editOverlay.querySelector("#ed-status");
+    const saveBtn      = editOverlay.querySelector("#ed-save");
+    const insertImgBtn = editOverlay.querySelector("#ed-insert-img");
+    const imgFileInput = editOverlay.querySelector("#ed-img-file");
+
+    insertImgBtn.addEventListener("click", () => imgFileInput.click());
+    imgFileInput.addEventListener("change", async () => {
+      const file = imgFileInput.files[0];
+      if (!file) return;
+      insertImgBtn.disabled = true;
+      insertImgBtn.textContent = "Uploading…";
+      const form = new FormData();
+      form.append("folder", folder);
+      form.append("file", file);
+      try {
+        const r = await fetch(_API + "/upload-image", { method: "POST", body: form });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "upload failed");
+        const sel = contentEl.selectionStart;
+        contentEl.value = contentEl.value.slice(0, sel) + d.markdown + contentEl.value.slice(contentEl.selectionEnd);
+        contentEl.selectionStart = contentEl.selectionEnd = sel + d.markdown.length;
+        contentEl.focus();
+      } catch(err) {
+        alert("Image upload failed: " + err.message);
+      } finally {
+        insertImgBtn.disabled = false;
+        insertImgBtn.textContent = "📷 Insert Image";
+        imgFileInput.value = "";
+      }
+    });
 
     editOverlay.querySelector("#ed-cancel").addEventListener("click", () => { editOverlay.remove(); editOverlay = null; });
     editOverlay.addEventListener("click", (e) => { if (e.target === editOverlay) { editOverlay.remove(); editOverlay = null; } });
