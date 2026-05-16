@@ -58,8 +58,9 @@ General comments (no quote) are shown as plain instructions. Quoted comments are
 After presenting the comments, mark each one as handled via the acknowledge endpoint so the browser shows a "✓ Handled" badge. Call once per comment, using the exact `ts` value from the JSON:
 
 ```bash
-source ~/coherence/.env
-curl -s -X POST http://localhost:8081/acknowledge \
+source "${COHERENCE_HOME:-~/code/coherence}/.env"
+COHERENCE_PORT="${COHERENCE_PORT:-8080}"
+curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
   -H "Content-Type: application/json" \
   -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
 ```
@@ -78,5 +79,5 @@ If a comment is ambiguous, ask the user to clarify before acting on it.
 - Comments are stored in `~/.coherence/data/<folder>/<slug>.comments.json` — plain JSON, easy to edit manually
 - To delete a comment: edit the file and remove the entry
 - To clear all comments for a doc: `rm ~/.coherence/data/<folder>/<slug>.comments.json`
-- Comments submitted via the browser form go to the comment server running on port 8081
+- Comments are submitted to the server on `COHERENCE_PORT` (from `.env`; default 8080 standalone, 8081 behind nginx)
 - The comment server is managed by systemd: `sudo systemctl status coherence-server`
