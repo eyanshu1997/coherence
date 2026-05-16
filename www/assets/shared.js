@@ -844,12 +844,98 @@ async function openMoveModal({ kind, folder, file, displayName }) {
   });
 }
 
+// ── Share popover ──────────────────────────────────────────────────────────
+function initShare() {
+  const shareBtn      = document.getElementById("share-btn");
+  const sharePop      = document.getElementById("share-popover");
+  const generateBtn   = document.getElementById("share-generate-btn");
+  const shareResult   = document.getElementById("share-result");
+  const shareUrlInput = document.getElementById("share-url-input");
+  const shareCopyBtn  = document.getElementById("share-copy-btn");
+  const shareExpires  = document.getElementById("share-expires");
+  const shareStatus   = document.getElementById("share-status");
+  const shareDays     = document.getElementById("share-days");
+
+  if (!shareBtn || !sharePop) return;
+
+  shareBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const showing = sharePop.style.display === "flex";
+    sharePop.style.display = showing ? "none" : "flex";
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    if (!sharePop.contains(e.target) && e.target !== shareBtn) {
+      sharePop.style.display = "none";
+    }
+  });
+
+  if (generateBtn) {
+    generateBtn.addEventListener("click", async () => {
+      if (shareStatus) { shareStatus.textContent = "Generating…"; shareStatus.className = "share-status"; }
+      if (shareResult) shareResult.style.display = "none";
+      try {
+        const days = shareDays ? parseInt(shareDays.value) : 30;
+        const path = window.location.pathname;
+        const r = await fetch("/comment-api/auth/share/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, days }),
+        });
+        if (!r.ok) throw new Error("server error " + r.status);
+        const data = await r.json();
+        if (shareUrlInput) shareUrlInput.value = data.url;
+        if (shareExpires)  shareExpires.textContent = "Expires " + data.expires;
+        if (shareResult)   shareResult.style.display = "flex";
+        if (shareStatus)   shareStatus.textContent = "";
+      } catch(e) {
+        if (shareStatus) { shareStatus.textContent = "Error: " + e.message; shareStatus.className = "share-status err"; }
+      }
+    });
+  }
+
+  if (shareCopyBtn && shareUrlInput) {
+    shareCopyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(shareUrlInput.value);
+        shareCopyBtn.textContent = "Copied!";
+        shareCopyBtn.classList.add("copied");
+        setTimeout(() => { shareCopyBtn.textContent = "Copy"; shareCopyBtn.classList.remove("copied"); }, 2000);
+      } catch(e) {
+        shareUrlInput.select();
+      }
+    });
+  }
+}
+
+// ── Share token propagation ────────────────────────────────────────────────
+// When a page is accessed via ?share=TOKEN, patch all local <a> links so
+// navigating within the share (folder → doc, breadcrumb, etc.) keeps the
+// token and doesn't hit the password prompt.
+function initSharePropagation() {
+  const token = new URLSearchParams(window.location.search).get("share");
+  if (!token) return;
+  document.querySelectorAll("a[href]").forEach(a => {
+    const href = a.getAttribute("href");
+    if (!href || href.startsWith("http") || href.startsWith("//")
+        || href.startsWith("mailto") || href.startsWith("#")
+        || href.startsWith("/auth/")) return;
+    try {
+      const url = new URL(a.href, window.location.href);
+      url.searchParams.set("share", token);
+      a.href = url.toString();
+    } catch(e) {}
+  });
+}
+
 // ── Auto-init on DOM ready ─────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   initNewFolderModal();
   initNewDocModal();
   initUploadModal();
   initEditMode();
+  initShare();
+  initSharePropagation();
 
   // Wire delete folder buttons (present on home page and repo index pages)
   document.querySelectorAll(".folder-delete-btn").forEach(btn => {

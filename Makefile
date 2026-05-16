@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COHERENCE_HOME := $(shell pwd)
 BIN_DIR := $(COHERENCE_HOME)/bin
-ASSET_VER := v27
+ASSET_VER := v28
 
 .PHONY: build test test-unit test-e2e clean generate-golden
 
