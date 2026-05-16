@@ -263,6 +263,7 @@ func parseListBlock(lines []string, inline func(string) string) string {
 }
 
 var (
+	imgRe    = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 	codeRe   = regexp.MustCompile("`([^`\n]+)`")
 	boldRe   = regexp.MustCompile(`\*\*(.+?)\*\*`)
 	italicRe = regexp.MustCompile(`\*(.+?)\*`)
@@ -272,6 +273,17 @@ var (
 )
 
 func applyInline(s, jiraBaseURL, githubOrg string) string {
+	// images — must run before link processing so ![alt](url) isn't partially matched
+	s = imgRe.ReplaceAllStringFunc(s, func(m string) string {
+		groups := imgRe.FindStringSubmatch(m)
+		alt := html.EscapeString(groups[1])
+		src := groups[2]
+		if strings.HasPrefix(src, "javascript:") || strings.HasPrefix(src, "data:") {
+			return m
+		}
+		return fmt.Sprintf(`<img src="%s" alt="%s" class="doc-image" loading="lazy">`,
+			html.EscapeString(src), alt)
+	})
 	// inline code (escape content)
 	s = codeRe.ReplaceAllStringFunc(s, func(m string) string {
 		inner := codeRe.FindStringSubmatch(m)[1]

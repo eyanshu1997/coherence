@@ -74,6 +74,20 @@ Present the content with the filename as a header so it's clear which doc each s
 <content>
 ```
 
+### Step 2b — Detect embedded images
+
+After extracting raw markdown, check for image references:
+
+```bash
+grep -oP '!\[[^\]]*\]\([^)]+\)' ~/.coherence/data/<folder>/<filename>.html 2>/dev/null
+```
+
+For each image path found (e.g. `![image](/coherence/images/1747393200000-screenshot.png)`):
+- Map the URL path to a local filesystem path: `~/.coherence/data/<relative-path>`
+  (strip the leading `/` and prepend the data dir)
+- Note in the loaded context: "Doc contains N image(s): [list of paths]"
+- If Claude needs to visually understand an image's contents, use the `Read` tool on the local file path — Claude is multimodal and can interpret PNG/JPG screenshots directly
+
 ### Step 3 — Load comments (read-doc-comments flow)
 
 After loading the docs, automatically run the full `/read-doc-comments` flow for the same folder:

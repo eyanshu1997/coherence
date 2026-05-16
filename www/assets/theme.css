@@ -434,6 +434,17 @@ pre:hover .copy-btn { opacity: 1; }
   font-style: italic;
 }
 
+/* ── Images ── */
+.doc-image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1rem 0;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+}
+
 /* ── Tables ── */
 .content table, table.doc-table {
   width: 100%;
