@@ -108,8 +108,9 @@ After loading the docs, automatically run the full `/read-doc-comments` flow for
 
 3. Acknowledge each comment:
    ```bash
-   source ~/coherence/.env
-   curl -s -X POST http://localhost:8080/acknowledge \
+   source "${COHERENCE_HOME:-~/code/coherence}/.env"
+   COHERENCE_PORT="${COHERENCE_PORT:-8080}"
+   curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
      -H "Content-Type: application/json" \
      -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
    ```
@@ -130,7 +131,7 @@ After loading, output a one-line summary:
 - Raw markdown is stored in `<script type="application/x-markdown" id="doc-raw-markdown">` inside each HTML file
 - If a doc has no embedded markdown (old format), falls back to stripping HTML tags
 - Comments are stored in `~/.coherence/data/<folder>/<slug>.comments.json`
-- The comment server runs on port 8080 by default: `sudo systemctl status coherence-server`
+- The comment server port is read from `COHERENCE_PORT` in `.env` (default 8080 standalone, 8081 behind nginx): `sudo systemctl status coherence-server`
 
 ## IMPORTANT — Do NOT call non-existent API endpoints
 
