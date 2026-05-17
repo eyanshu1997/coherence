@@ -58,7 +58,7 @@ General comments (no quote) are shown as plain instructions. Quoted comments are
 After presenting the comments, mark each one as handled via the acknowledge endpoint so the browser shows a "✓ Handled" badge. Call once per comment, using the exact `ts` value from the JSON:
 
 ```bash
-source "${COHERENCE_HOME:-~/code/coherence}/.env"
+COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"; source "${COHERENCE_HOME}/.env"
 COHERENCE_PORT="${COHERENCE_PORT:-8080}"
 curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
   -H "Content-Type: application/json" \

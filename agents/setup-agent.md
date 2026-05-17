@@ -22,7 +22,7 @@ echo "COHERENCE_HOME=$COHERENCE_HOME"
 
 Or set it explicitly if you already know the path:
 ```bash
-export COHERENCE_HOME=~/code/coherence   # adjust as needed
+export COHERENCE_HOME=/path/to/coherence   # replace with actual path on this machine
 ```
 
 ### Step 1 — Build Go binaries
@@ -128,7 +128,36 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### Step 5 — Configure ~/.claude/ (hooks, settings, CLAUDE.md)
 
-This step sets `COHERENCE_HOME` in Claude Code's environment so all hooks resolve the
+#### 5a — Persist COHERENCE_HOME in the shell profile
+
+`COHERENCE_HOME` must be exported in the user's shell profile so every terminal session
+and Claude Code invocation inherits it automatically:
+
+```bash
+SHELL_RC=""
+if [ -f ~/.zshrc ]; then
+  SHELL_RC=~/.zshrc
+elif [ -f ~/.bashrc ]; then
+  SHELL_RC=~/.bashrc
+fi
+
+if [ -n "$SHELL_RC" ]; then
+  if grep -q "COHERENCE_HOME" "$SHELL_RC"; then
+    echo "COHERENCE_HOME already in $SHELL_RC — skipping"
+  else
+    echo "" >> "$SHELL_RC"
+    echo "export COHERENCE_HOME=\"$COHERENCE_HOME\"" >> "$SHELL_RC"
+    echo "Added COHERENCE_HOME to $SHELL_RC"
+  fi
+else
+  echo "WARNING: could not find ~/.zshrc or ~/.bashrc — add manually:"
+  echo "  export COHERENCE_HOME=\"$COHERENCE_HOME\""
+fi
+```
+
+#### 5b — Configure Claude Code settings (hooks + COHERENCE_HOME env)
+
+This step also sets `COHERENCE_HOME` in Claude Code's environment so all hooks resolve the
 repo path dynamically — no symlink or hardcoded path needed.
 
 ```bash
