@@ -25,7 +25,7 @@ ls ~/.coherence/data/
 
 The argument may be a folder name, a doc URL, or a URL pointing to a folder root.
 
-**If the argument is a URL** (matching the public base URL constructed from `DOC_HOST`/`DOC_PORT`/`DOC_SCHEME` in `~/coherence/.env`):
+**If the argument is a URL** (matching the public base URL constructed from `DOC_HOST`/`DOC_PORT`/`DOC_SCHEME` in `$COHERENCE_HOME/.env`):
 - Strip the host prefix to get the path
 - If the path ends in `.html` → extract `<folder>` and `<filename>` from it, load only that one file
   - Example: `PROJ-123/plan.html` → folder=`PROJ-123`, file=`plan.html`
@@ -108,7 +108,7 @@ After loading the docs, automatically run the full `/read-doc-comments` flow for
 
 3. Acknowledge each comment:
    ```bash
-   source "${COHERENCE_HOME:-~/code/coherence}/.env"
+   COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"; source "${COHERENCE_HOME}/.env"
    COHERENCE_PORT="${COHERENCE_PORT:-8080}"
    curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
      -H "Content-Type: application/json" \

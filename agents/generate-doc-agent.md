@@ -1,7 +1,24 @@
 # /generate-doc — Generate a Styled HTML Summary Document
 
+## Path Resolution
+
+`COHERENCE_HOME` is the canonical variable for the coherence install location. It must be set
+in the shell (exported via `~/.zshrc`, `~/.bashrc`, or equivalent).
+
+If it is not set, detect it automatically — never hardcode a path:
+
+```bash
+COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"
+```
+
+This works because `coherence-doc` lives at `$COHERENCE_HOME/bin/coherence-doc`.
+
+The `.env` file lives at `$COHERENCE_HOME/.env`. The data dir is `~/.coherence/data/`.
+
+---
+
 Generate a styled HTML document in `~/.coherence/data/<folder>/` and serve it at
-`<DOC_BASE_URL>/<folder>/<slug>.html` (where `DOC_BASE_URL` is set in `~/coherence/.env`).
+`<DOC_BASE_URL>/<folder>/<slug>.html` (where `DOC_BASE_URL` is set in `$COHERENCE_HOME/.env`).
 
 The home page lists all folders with clickable links.
 Each folder page lists the documents inside it.
@@ -42,10 +59,10 @@ Every plan, analysis, fix-summary, and log file belongs in a specific `~/.cohere
 Examples:
 ```bash
 # Jira fix in repo-a
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate --folder "repo-a/PROJ-123" --filename "plan.html" ...
+"${COHERENCE_HOME}/bin/coherence-doc" generate --folder "repo-a/PROJ-123" --filename "plan.html" ...
 
 # Investigation / topic work with a descriptive slug
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate --folder "perf-analysis" --filename "analysis.html" ...
+"${COHERENCE_HOME}/bin/coherence-doc" generate --folder "perf-analysis" --filename "analysis.html" ...
 ```
 
 ---
@@ -132,7 +149,7 @@ cat > /tmp/fix-summary.md << 'DOCEOF'
 <content here>
 DOCEOF
 
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate \
+"${COHERENCE_HOME}/bin/coherence-doc" generate \
   --folder "PROJ-XXXXX" \
   --title "Fix Summary: <ticket summary>" \
   --filename "fix-summary.html" \
@@ -201,7 +218,7 @@ cat > /tmp/doc-content.md << 'DOCEOF'
 <content here>
 DOCEOF
 
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" generate \
+"${COHERENCE_HOME}/bin/coherence-doc" generate \
   --folder "PROJ-123" \
   --title "Fix Summary: <title>" \
   --filename "fix-summary.html" \
@@ -226,7 +243,7 @@ After the CLI runs, report:
 To rebuild all index pages without creating a new document (e.g. after manual edits):
 
 ```bash
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" reindex
+"${COHERENCE_HOME}/bin/coherence-doc" reindex
 ```
 
 ---
@@ -327,7 +344,7 @@ A clean run prints only `Generating single mermaid chart.`. Fix any parse error 
 Generate share tokens with the `coherence-doc share` command:
 
 ```bash
-"${COHERENCE_HOME:-$HOME/coherence}/bin/coherence-doc" share --days 365 /repo-a/PROJ-XXXXX/plan.html
+"${COHERENCE_HOME}/bin/coherence-doc" share --days 365 /repo-a/PROJ-XXXXX/plan.html
 ```
 
 Run one call per destination path. Use `--days 365` for long-lived documents, `--days 30` for short-term shares.
