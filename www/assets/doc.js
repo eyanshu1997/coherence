@@ -103,6 +103,9 @@ function renderComments(comments) {
     const quoteHtml = c.quote
       ? `<div class="comment-quote">${escHtml(c.quote)}</div>`
       : "";
+    const authorHtml = c.author && c.author !== "anonymous"
+      ? `<span class="comment-author">${escHtml(c.author)}</span>`
+      : "";
     // handled supersedes acknowledged — show if either is set
     const isHandled = c.handled || c.acknowledged;
     const handledTs = c.reply_ts || c.ack_ts || "";
@@ -119,7 +122,7 @@ function renderComments(comments) {
     return (
       `<div class="${itemClass}">` +
         `<div class="comment-item-header">` +
-          `<div class="comment-ts">${fmtTs(c.ts)}</div>` +
+          `<div class="comment-ts">${authorHtml}${fmtTs(c.ts)}</div>` +
           badge +
         `</div>` +
         quoteHtml +
@@ -624,6 +627,16 @@ async function handleExcludeSession(btn) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  if (window.REMOTE_USER && window.REMOTE_USER !== "anonymous") {
+    const badge = document.createElement("span");
+    badge.className = "remote-user-badge";
+    badge.textContent = window.REMOTE_USER;
+    const header = document.querySelector(".site-header");
+    const firstBtn = header && header.querySelector("button");
+    if (firstBtn) header.insertBefore(badge, firstBtn);
+    else if (header) header.appendChild(badge);
+  }
+
   initScrollspy();
   initCopyButtons();
   initMermaid();

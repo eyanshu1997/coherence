@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"coherence/internal/auth"
 	"coherence/internal/config"
 	"coherence/internal/docgen"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -249,8 +251,9 @@ func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(data, &comments)
 	}
 	entry := map[string]any{
-		"ts":   time.Now().UTC().Format(time.RFC3339),
-		"text": text,
+		"ts":     time.Now().UTC().Format(time.RFC3339),
+		"text":   text,
+		"author": h.currentUser(r),
 	}
 	if quote != "" {
 		entry["quote"] = quote
@@ -337,10 +340,12 @@ func (h *Handler) handleReplyComment(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(data, &comments)
 	replyTs := time.Now().UTC().Format(time.RFC3339)
 	matched := 0
+	replyAuthor := h.currentUser(r)
 	for _, c := range comments {
 		if c["ts"] == ts {
 			c["reply"] = reply
 			c["reply_ts"] = replyTs
+			c["reply_author"] = replyAuthor
 			c["handled"] = true
 			matched++
 		}
@@ -1253,6 +1258,67 @@ func (h *Handler) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── user identity ──────────────────────────────────────────────────────────
+
+func (h *Handler) currentUser(r *http.Request) string {
+	if h.cfg.RemoteUserJWTHeader != "" {
+		if jwt := r.Header.Get(h.cfg.RemoteUserJWTHeader); jwt != "" {
+			if email := extractEmailFromJWT(jwt); email != "" {
+				return email
+			}
+		}
+	}
+	if h.cfg.RemoteUserHeader != "" {
+		if user := r.Header.Get(h.cfg.RemoteUserHeader); user != "" {
+			return user
+		}
+	}
+	return "anonymous"
+}
+
+// extractEmailFromJWT decodes a JWT payload and returns the "email" claim.
+// No signature verification — the auth proxy already verified the token.
+func extractEmailFromJWT(token string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	if email, ok := claims["email"].(string); ok {
+		return email
+	}
+	return ""
+}
+
+// userAllowed checks the user against the configured allowlist.
+// When no allowlist is configured, all non-anonymous users are allowed.
+// The check is skipped entirely (returns true) when neither AllowedUsers
+// nor AllowedDomain is set, preserving open-access for no-proxy deployments.
+func (h *Handler) userAllowed(user string) bool {
+	if len(h.cfg.AllowedUsers) == 0 && h.cfg.AllowedDomain == "" {
+		return true
+	}
+	if user == "anonymous" {
+		return false
+	}
+	for _, u := range h.cfg.AllowedUsers {
+		if strings.EqualFold(u, user) {
+			return true
+		}
+	}
+	if h.cfg.AllowedDomain != "" {
+		return strings.HasSuffix(strings.ToLower(user), "@"+strings.ToLower(h.cfg.AllowedDomain))
+	}
+	return false
+}
+
 // ── static file serving ────────────────────────────────────────────────────
 
 func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, relPath string) {
@@ -1290,9 +1356,10 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, relPath str
 }
 
 func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path string) {
+	shareToken := r.URL.Query().Get("share")
+
 	cfg := h.loadAuthConfig()
 	if cfg != nil {
-		shareToken := r.URL.Query().Get("share")
 		if shareToken != "" {
 			if !auth.CheckShare(h.cfg.SharesFile, shareToken, path) && !h.sessionOK(r) {
 				http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(path), http.StatusFound)
@@ -1302,6 +1369,15 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 			http.Redirect(w, r, "/auth/login?next="+url.QueryEscape(path), http.StatusFound)
 			return
 		}
+	}
+
+	// Allowlist check — only enforced when ALLOWED_USERS or ALLOWED_DOMAIN is configured.
+	// Share tokens always bypass this check.
+	user := h.currentUser(r)
+	validShare := shareToken != "" && auth.CheckShare(h.cfg.SharesFile, shareToken, path)
+	if !h.userAllowed(user) && !validShare {
+		sendHTML(w, 403, "<h1>403 Forbidden</h1><p>Your account is not authorized.</p>")
+		return
 	}
 
 	// Resolve path to file
@@ -1340,6 +1416,11 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	mimeType := mime.TypeByExtension(filepath.Ext(fpAbs))
 	if mimeType == "" {
 		mimeType = "text/html"
+	}
+	if strings.Contains(mimeType, "html") {
+		userJSON, _ := json.Marshal(user)
+		inject := []byte(`<script>window.REMOTE_USER=` + string(userJSON) + `;</script>`)
+		data = bytes.Replace(data, []byte("</head>"), append(inject, []byte("</head>")...), 1)
 	}
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))

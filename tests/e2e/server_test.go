@@ -2,21 +2,38 @@ package e2e
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"coherence/internal/config"
 	"coherence/internal/docgen"
 	"coherence/internal/server"
 )
 
+// tempDataDir creates a temp dir and registers cleanup with a brief delay so
+// async ReindexAll goroutines finish before the dir is removed.
+func tempDataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "coherence-e2e-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		time.Sleep(50 * time.Millisecond)
+		os.RemoveAll(dir)
+	})
+	return dir
+}
+
 func newTestServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
-	dataDir := t.TempDir()
+	dataDir := tempDataDir(t)
 	coherenceHome := t.TempDir()
 	assetsDir := filepath.Join(coherenceHome, "www", "assets")
 	os.MkdirAll(assetsDir, 0755)
@@ -180,5 +197,150 @@ func TestInvalidCommentPath(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Fatalf("path traversal: expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// newTestServerWithIdentity builds a server configured with an allowlist.
+func newTestServerWithIdentity(t *testing.T, allowedUsers []string, allowedDomain string) (*httptest.Server, string) {
+	t.Helper()
+	dataDir := tempDataDir(t)
+	coherenceHome := t.TempDir()
+	os.MkdirAll(filepath.Join(coherenceHome, "www", "assets"), 0755)
+
+	cfg := &config.Config{
+		DataDir:          dataDir,
+		CoherenceHome:    coherenceHome,
+		DocBase:          "http://localhost",
+		CoherencePort:    "8080",
+		CoherenceBind:    "127.0.0.1",
+		AuthFile:         filepath.Join(t.TempDir(), "auth.json"),
+		SharesFile:       filepath.Join(t.TempDir(), "shares.json"),
+		RemoteUserHeader: "X-Remote-User",
+		AllowedUsers:     allowedUsers,
+		AllowedDomain:    allowedDomain,
+	}
+	dgCfg := &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"}
+	h := server.New(cfg, dgCfg)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	return ts, dataDir
+}
+
+func TestCommentStoresAuthor(t *testing.T) {
+	ts, dataDir := newTestServer(t)
+	os.MkdirAll(filepath.Join(dataDir, "test-folder"), 0755)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/comment", strings.NewReader(`{"folder":"test-folder","file":"test-doc","text":"with author"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Remote-User", "alice@example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	resp2, err := http.Get(ts.URL + "/comments?folder=test-folder&file=test-doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var comments []map[string]any
+	json.NewDecoder(resp2.Body).Decode(&comments)
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	// Default config has no RemoteUserHeader set, so author will be anonymous.
+	// This test just verifies the field is present.
+	if _, ok := comments[0]["author"]; !ok {
+		t.Error("comment missing author field")
+	}
+}
+
+func TestAllowlistBlocks403(t *testing.T) {
+	ts, dataDir := newTestServerWithIdentity(t, []string{"bob@example.com"}, "")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	// Request with no identity header — should get 403
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("anonymous request with allowlist: expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestAllowlistPermitsUser(t *testing.T) {
+	ts, dataDir := newTestServerWithIdentity(t, []string{"alice@example.com"}, "")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "alice@example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("permitted user: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestAllowlistDomainPermits(t *testing.T) {
+	ts, dataDir := newTestServerWithIdentity(t, nil, "example.com")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "anyone@example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("domain-allowed user: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestNoAllowlistOpenAccess(t *testing.T) {
+	ts, dataDir := newTestServer(t) // no AllowedUsers, no AllowedDomain
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	// No identity header — should still get 200 (open access preserved)
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("no-allowlist open access: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRemoteUserInjectedInHTML(t *testing.T) {
+	ts, dataDir := newTestServerWithIdentity(t, nil, "")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "carol@example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var buf strings.Builder
+	io.Copy(&buf, resp.Body)
+	body := buf.String()
+	if !strings.Contains(body, `window.REMOTE_USER="carol@example.com"`) {
+		t.Errorf("REMOTE_USER not injected into HTML; body: %s", body)
 	}
 }

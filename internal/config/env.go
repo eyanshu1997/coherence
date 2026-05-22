@@ -8,20 +8,24 @@ import (
 )
 
 type Config struct {
-	DataDir      string
-	DocHost      string
-	DocPort      string
-	DocScheme    string
-	DocBase      string
-	CoherencePort string
-	CoherenceBind string
-	JiraBaseURL  string
-	GitHubOrg    string
-	FooterText   string
-	CompactThreshold string
-	CoherenceHome string
-	AuthFile     string
-	SharesFile   string
+	DataDir            string
+	DocHost            string
+	DocPort            string
+	DocScheme          string
+	DocBase            string
+	CoherencePort      string
+	CoherenceBind      string
+	JiraBaseURL        string
+	GitHubOrg          string
+	FooterText         string
+	CompactThreshold   string
+	CoherenceHome      string
+	AuthFile           string
+	SharesFile         string
+	RemoteUserHeader   string
+	RemoteUserJWTHeader string
+	AllowedUsers       []string
+	AllowedDomain      string
 }
 
 func Load() *Config {
@@ -41,21 +45,45 @@ func Load() *Config {
 	docScheme := getenv("DOC_SCHEME", defaultScheme(docHost, docPort))
 
 	return &Config{
-		DataDir:       dataDir,
-		DocHost:       docHost,
-		DocPort:       docPort,
-		DocScheme:     docScheme,
-		DocBase:       docScheme + "://" + docHost + ":" + docPort,
-		CoherencePort: getenv("COHERENCE_PORT", "8080"),
-		CoherenceBind: getenv("COHERENCE_BIND", "0.0.0.0"),
-		JiraBaseURL:   strings.TrimRight(getenv("JIRA_BASE_URL", ""), "/"),
-		GitHubOrg:     getenv("GITHUB_ORG", ""),
-		FooterText:    getenv("FOOTER_TEXT", "Built with coherence"),
-		CompactThreshold: getenv("COMPACT_THRESHOLD", "50"),
-		CoherenceHome: coherenceHome,
-		AuthFile:      filepath.Join(home, ".ssh", "doc-auth.json"),
-		SharesFile:    filepath.Join(home, ".ssh", "doc-shares.json"),
+		DataDir:             dataDir,
+		DocHost:             docHost,
+		DocPort:             docPort,
+		DocScheme:           docScheme,
+		DocBase:             buildDocBase(docScheme, docHost, docPort),
+		CoherencePort:       getenv("COHERENCE_PORT", "8080"),
+		CoherenceBind:       getenv("COHERENCE_BIND", "0.0.0.0"),
+		JiraBaseURL:         strings.TrimRight(getenv("JIRA_BASE_URL", ""), "/"),
+		GitHubOrg:           getenv("GITHUB_ORG", ""),
+		FooterText:          getenv("FOOTER_TEXT", "Built with coherence"),
+		CompactThreshold:    getenv("COMPACT_THRESHOLD", "50"),
+		CoherenceHome:       coherenceHome,
+		AuthFile:            filepath.Join(home, ".ssh", "doc-auth.json"),
+		SharesFile:          filepath.Join(home, ".ssh", "doc-shares.json"),
+		RemoteUserHeader:    getenv("REMOTE_USER_HEADER", "X-Remote-User"),
+		RemoteUserJWTHeader: getenv("REMOTE_USER_JWT_HEADER", ""),
+		AllowedUsers:        splitCSV(getenv("ALLOWED_USERS", "")),
+		AllowedDomain:       getenv("ALLOWED_DOMAIN", ""),
 	}
+}
+
+func buildDocBase(scheme, host, port string) string {
+	if port == "" || (port == "80" && scheme == "http") || (port == "443" && scheme == "https") {
+		return scheme + "://" + host
+	}
+	return scheme + "://" + host + ":" + port
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func getenv(key, fallback string) string {
