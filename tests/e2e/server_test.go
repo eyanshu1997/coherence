@@ -344,3 +344,223 @@ func TestRemoteUserInjectedInHTML(t *testing.T) {
 		t.Errorf("REMOTE_USER not injected into HTML; body: %s", body)
 	}
 }
+
+// newTestServerWithGuestAccess builds a server with an allowlist and GUEST_ACCESS=true.
+func newTestServerWithGuestAccess(t *testing.T, allowedUsers []string) (*httptest.Server, string) {
+	t.Helper()
+	dataDir := tempDataDir(t)
+	coherenceHome := t.TempDir()
+	os.MkdirAll(filepath.Join(coherenceHome, "www", "assets"), 0755)
+
+	cfg := &config.Config{
+		DataDir:          dataDir,
+		CoherenceHome:    coherenceHome,
+		DocBase:          "http://localhost",
+		CoherencePort:    "8080",
+		CoherenceBind:    "127.0.0.1",
+		AuthFile:         filepath.Join(t.TempDir(), "auth.json"),
+		SharesFile:       filepath.Join(t.TempDir(), "shares.json"),
+		RemoteUserHeader: "X-Remote-User",
+		AllowedUsers:     allowedUsers,
+		GuestAccess:      true,
+	}
+	dgCfg := &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"}
+	h := server.New(cfg, dgCfg)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	return ts, dataDir
+}
+
+// TestGuestAccessAllowsNonAllowedUser verifies that an authenticated user not in
+// ALLOWED_USERS gets 200 (not 403) when GUEST_ACCESS=true.
+func TestGuestAccessAllowsNonAllowedUser(t *testing.T) {
+	ts, dataDir := newTestServerWithGuestAccess(t, []string{"owner@example.com"})
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "guest@other.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("guest access: expected 200 for non-allowed user, got %d", resp.StatusCode)
+	}
+}
+
+// TestGuestAccessBlocked verifies that without GUEST_ACCESS a non-allowed user gets 403.
+func TestGuestAccessBlocked(t *testing.T) {
+	ts, dataDir := newTestServerWithIdentity(t, []string{"owner@example.com"}, "")
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "guest@other.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("no guest access: expected 403 for non-allowed user, got %d", resp.StatusCode)
+	}
+}
+
+// TestIsOwnerInjectedForOwner verifies window.IS_OWNER=true for an allowed user.
+func TestIsOwnerInjectedForOwner(t *testing.T) {
+	ts, dataDir := newTestServerWithGuestAccess(t, []string{"owner@example.com"})
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "owner@example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var buf strings.Builder
+	io.Copy(&buf, resp.Body)
+	body := buf.String()
+	if !strings.Contains(body, `window.IS_OWNER=true`) {
+		t.Errorf("IS_OWNER not true for allowed user; body snippet: %s", body[:min(200, len(body))])
+	}
+}
+
+// TestIsOwnerInjectedFalseForGuest verifies window.IS_OWNER=false for a guest.
+func TestIsOwnerInjectedFalseForGuest(t *testing.T) {
+	ts, dataDir := newTestServerWithGuestAccess(t, []string{"owner@example.com"})
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Header.Set("X-Remote-User", "guest@other.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var buf strings.Builder
+	io.Copy(&buf, resp.Body)
+	body := buf.String()
+	if !strings.Contains(body, `window.IS_OWNER=false`) {
+		t.Errorf("IS_OWNER not false for guest; body snippet: %s", body[:min(200, len(body))])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// TestNoAllowlistAlwaysOwner verifies that when ALLOWED_USERS is not configured
+// every visitor (including anonymous) gets IS_OWNER=true — there is no guest view.
+func TestNoAllowlistAlwaysOwner(t *testing.T) {
+	ts, dataDir := newTestServer(t) // no AllowedUsers, no AllowedDomain
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
+
+	// Request with no identity header — anonymous user.
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var buf strings.Builder
+	io.Copy(&buf, resp.Body)
+	body := buf.String()
+	if !strings.Contains(body, `window.IS_OWNER=true`) {
+		t.Errorf("anonymous user without allowlist should be IS_OWNER=true; body: %s", body[:min(300, len(body))])
+	}
+}
+
+// TestSearchAcrossFolders verifies that /search returns results from multiple
+// folders, not just the current one.
+func TestSearchAcrossFolders(t *testing.T) {
+	ts, dataDir := newTestServer(t)
+
+	// Create docs in two separate folders.
+	folderA := filepath.Join(dataDir, "folder-alpha")
+	folderB := filepath.Join(dataDir, "folder-beta")
+	os.MkdirAll(folderA, 0755)
+	os.MkdirAll(folderB, 0755)
+
+	docA := `<html><head><title>Alpha Doc</title></head><body><div class="content"><p>uniquetermalpha</p></div></body></html>`
+	docB := `<html><head><title>Beta Doc</title></head><body><div class="content"><p>uniquetermalpha</p></div></body></html>`
+	os.WriteFile(filepath.Join(folderA, "doc-a.html"), []byte(docA), 0644)
+	os.WriteFile(filepath.Join(folderB, "doc-b.html"), []byte(docB), 0644)
+
+	resp, err := http.Get(ts.URL + "/search?q=uniquetermalpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("search: expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Results []struct {
+			Folder string `json:"folder"`
+			File   string `json:"file"`
+			Title  string `json:"title"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) < 2 {
+		t.Fatalf("expected results from both folders, got %d results", len(result.Results))
+	}
+	folders := make(map[string]bool)
+	for _, r := range result.Results {
+		folders[r.Folder] = true
+	}
+	if !folders["folder-alpha"] {
+		t.Error("search results missing folder-alpha")
+	}
+	if !folders["folder-beta"] {
+		t.Error("search results missing folder-beta")
+	}
+}
+
+// TestSearchNestedFolders verifies that /search finds docs inside nested
+// subdirectory structures (e.g. repo-a/PROJ-123).
+func TestSearchNestedFolders(t *testing.T) {
+	ts, dataDir := newTestServer(t)
+
+	nested := filepath.Join(dataDir, "repo-a", "PROJ-999")
+	os.MkdirAll(nested, 0755)
+	doc := `<html><head><title>Nested Plan</title></head><body><div class="content"><p>uniquetermnestedxyz</p></div></body></html>`
+	os.WriteFile(filepath.Join(nested, "plan.html"), []byte(doc), 0644)
+
+	resp, err := http.Get(ts.URL + "/search?q=uniquetermnestedxyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Results []struct {
+			Folder string `json:"folder"`
+			URL    string `json:"url"`
+		} `json:"results"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Results) == 0 {
+		t.Fatal("search returned no results for nested folder doc")
+	}
+	if result.Results[0].Folder != "repo-a/PROJ-999" {
+		t.Errorf("expected folder repo-a/PROJ-999, got %q", result.Results[0].Folder)
+	}
+	if result.Results[0].URL != "/repo-a/PROJ-999/plan.html" {
+		t.Errorf("expected URL /repo-a/PROJ-999/plan.html, got %q", result.Results[0].URL)
+	}
+}

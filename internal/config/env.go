@@ -26,6 +26,7 @@ type Config struct {
 	RemoteUserJWTHeader string
 	AllowedUsers       []string
 	AllowedDomain      string
+	GuestAccess        bool
 }
 
 func Load() *Config {
@@ -63,6 +64,7 @@ func Load() *Config {
 		RemoteUserJWTHeader: getenv("REMOTE_USER_JWT_HEADER", ""),
 		AllowedUsers:        splitCSV(getenv("ALLOWED_USERS", "")),
 		AllowedDomain:       getenv("ALLOWED_DOMAIN", ""),
+		GuestAccess:         getenv("GUEST_ACCESS", "") == "true",
 	}
 }
 

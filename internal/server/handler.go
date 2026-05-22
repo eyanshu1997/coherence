@@ -1283,7 +1283,7 @@ func extractEmailFromJWT(token string) string {
 	if len(parts) < 2 {
 		return ""
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
 	if err != nil {
 		return ""
 	}
@@ -1372,10 +1372,12 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	}
 
 	// Allowlist check — only enforced when ALLOWED_USERS or ALLOWED_DOMAIN is configured.
-	// Share tokens always bypass this check.
+	// Share tokens always bypass this check. When GUEST_ACCESS=true, authenticated
+	// non-allowed users are served the page in read-only mode instead of getting 403.
 	user := h.currentUser(r)
 	validShare := shareToken != "" && auth.CheckShare(h.cfg.SharesFile, shareToken, path)
-	if !h.userAllowed(user) && !validShare {
+	isOwner := h.userAllowed(user) || validShare
+	if !isOwner && !h.cfg.GuestAccess {
 		sendHTML(w, 403, "<h1>403 Forbidden</h1><p>Your account is not authorized.</p>")
 		return
 	}
@@ -1419,7 +1421,8 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	}
 	if strings.Contains(mimeType, "html") {
 		userJSON, _ := json.Marshal(user)
-		inject := []byte(`<script>window.REMOTE_USER=` + string(userJSON) + `;</script>`)
+		ownerJSON, _ := json.Marshal(isOwner)
+		inject := []byte(`<script>window.REMOTE_USER=` + string(userJSON) + `;window.IS_OWNER=` + string(ownerJSON) + `;</script>`)
 		data = bytes.Replace(data, []byte("</head>"), append(inject, []byte("</head>")...), 1)
 	}
 	w.Header().Set("Content-Type", mimeType)
