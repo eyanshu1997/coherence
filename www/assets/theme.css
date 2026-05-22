@@ -1251,6 +1251,17 @@ table.dash-sortable th[data-col]:hover { color: var(--accent); }
   white-space: nowrap;
   flex-shrink: 0;
 }
+.guest-read-only-badge {
+  font-size: 11px;
+  color: var(--text3);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-left: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
 .comment-author {
   font-size: 11px;
   color: var(--text3);

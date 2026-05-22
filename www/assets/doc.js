@@ -637,6 +637,24 @@ document.addEventListener("DOMContentLoaded", () => {
     else if (header) header.appendChild(badge);
   }
 
+  // Guest mode: IS_OWNER is injected by the server. When false, hide all write
+  // controls and show a read-only banner.
+  if (window.IS_OWNER === false) {
+    ["edit-doc-btn", "share-btn", "sel-chip", "comment-submit-btn"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    });
+    const form = document.querySelector(".comment-form");
+    if (form) form.style.display = "none";
+    const header = document.querySelector(".site-header");
+    if (header) {
+      const banner = document.createElement("span");
+      banner.className = "guest-read-only-badge";
+      banner.textContent = "Read-only access";
+      header.appendChild(banner);
+    }
+  }
+
   initScrollspy();
   initCopyButtons();
   initMermaid();

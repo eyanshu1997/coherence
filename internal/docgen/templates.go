@@ -255,5 +255,6 @@ const folderTemplate = `<!DOCTYPE html>
 </div>
 <script>window.INDEX_FOLDER = "{{.FolderPath}}";</script>
 <script src="/assets/shared.js?{{.AssetVer}}"></script>
+<script src="/assets/home.js?{{.AssetVer}}"></script>
 </body>
 </html>`
