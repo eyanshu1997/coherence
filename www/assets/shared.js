@@ -1074,6 +1074,16 @@ function initSharePropagation() {
 
 // ── Auto-init on DOM ready ─────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  if (window.REMOTE_USER && window.REMOTE_USER !== "anonymous") {
+    const badge = document.createElement("span");
+    badge.className = "remote-user-badge";
+    badge.textContent = window.REMOTE_USER;
+    const header = document.querySelector(".site-header");
+    const firstBtn = header && header.querySelector("button");
+    if (firstBtn) header.insertBefore(badge, firstBtn);
+    else if (header) header.appendChild(badge);
+  }
+
   initNewFolderModal();
   initNewDocModal();
   initUploadModal();
