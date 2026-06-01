@@ -2,6 +2,11 @@
 
 Sets up the `coherence` environment on a new machine: Go binaries, `.env`, systemd service, nginx config, and slash commands.
 
+> **Teammate setup (no local server)?**
+> If this machine will use a shared remote server instead of running its own, follow
+> `agents/setup-teammate-agent.md` (or run `/setup-teammate`) instead — it skips
+> systemd, nginx, and server config entirely.
+
 ## Prerequisites
 - coherence repo already cloned somewhere on disk
 - Go 1.22+ installed (`go version`)
