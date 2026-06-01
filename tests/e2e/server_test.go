@@ -531,6 +531,135 @@ func TestSearchAcrossFolders(t *testing.T) {
 	}
 }
 
+// newTestServerWithAPIKey builds a server configured with an API key.
+func newTestServerWithAPIKey(t *testing.T, apiKey string) (*httptest.Server, string) {
+	t.Helper()
+	dataDir := tempDataDir(t)
+	coherenceHome := t.TempDir()
+	os.MkdirAll(filepath.Join(coherenceHome, "www", "assets"), 0755)
+
+	cfg := &config.Config{
+		DataDir:       dataDir,
+		CoherenceHome: coherenceHome,
+		DocBase:       "http://localhost",
+		CoherencePort: "8080",
+		CoherenceBind: "127.0.0.1",
+		AuthFile:      filepath.Join(t.TempDir(), "auth.json"),
+		SharesFile:    filepath.Join(t.TempDir(), "shares.json"),
+		APIKey:        apiKey,
+	}
+	dgCfg := &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"}
+	h := server.New(cfg, dgCfg)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	return ts, dataDir
+}
+
+func postWithKey(t *testing.T, url, key, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestAPIKeyCreateDoc(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "test-secret")
+	body := `{"folder":"api-folder","title":"API Test","content":"hello","overwrite":true}`
+	resp := postWithKey(t, ts.URL+"/create-doc", "test-secret", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("create-doc with valid API key: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["ok"] != true {
+		t.Errorf("expected ok=true, got %v", result)
+	}
+}
+
+func TestAPIKeyCreateDocRejectsWrongKey(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "correct-secret")
+	body := `{"folder":"api-folder","title":"API Test","content":"hello","overwrite":true}`
+	resp := postWithKey(t, ts.URL+"/create-doc", "wrong-secret", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("create-doc with wrong API key: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPIKeyCreateDocRejectsMissingKey(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "correct-secret")
+	body := `{"folder":"api-folder","title":"API Test","content":"hello","overwrite":true}`
+	resp := postWithKey(t, ts.URL+"/create-doc", "", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("create-doc with no API key: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPIKeyUpdateDoc(t *testing.T) {
+	ts, dataDir := newTestServerWithAPIKey(t, "test-secret")
+	// Pre-create the doc file so update can find it.
+	folderPath := filepath.Join(dataDir, "upd-folder")
+	os.MkdirAll(folderPath, 0755)
+	os.WriteFile(filepath.Join(folderPath, "doc.html"), []byte(`<html><head><title>Old</title></head><body></body></html>`), 0644)
+
+	body := `{"folder":"upd-folder","filename":"doc.html","title":"Updated","content":"new content"}`
+	resp := postWithKey(t, ts.URL+"/update-doc", "test-secret", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("update-doc with valid API key: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPIKeyReindex(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "test-secret")
+	resp := postWithKey(t, ts.URL+"/reindex", "test-secret", "{}")
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("reindex with valid API key: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["ok"] != true {
+		t.Errorf("expected ok=true, got %v", result)
+	}
+}
+
+func TestAPIKeyReindexRejectsNoKey(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "test-secret")
+	resp := postWithKey(t, ts.URL+"/reindex", "", "{}")
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("reindex with no key: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestAPIKeyShareCreate(t *testing.T) {
+	ts, _ := newTestServerWithAPIKey(t, "test-secret")
+	body := `{"path":"/some-folder/doc.html","days":7}`
+	resp := postWithKey(t, ts.URL+"/auth/share/create", "test-secret", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("share/create with valid API key: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["token"] == nil {
+		t.Errorf("expected token in response, got %v", result)
+	}
+}
+
 // TestSearchNestedFolders verifies that /search finds docs inside nested
 // subdirectory structures (e.g. repo-a/PROJ-123).
 func TestSearchNestedFolders(t *testing.T) {
