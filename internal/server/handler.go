@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -65,7 +66,10 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		return
 	}
-
+	
+	user := h.currentUser(r)
+	log.Printf("Access user = %s %s %s", user, r.Method, p)
+	
 	switch r.Method {
 	case http.MethodGet:
 		switch p {
