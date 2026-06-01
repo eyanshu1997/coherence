@@ -124,6 +124,8 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleCreateDoc(w, r)
 		case "/update-doc":
 			h.handleUpdateDoc(w, r)
+		case "/reindex":
+			h.handleReindex(w, r)
 		case "/upload-file":
 			h.handleUploadFile(w, r)
 		case "/upload-image":
@@ -187,6 +189,28 @@ func (h *Handler) sessionOK(r *http.Request) bool {
 		return false
 	}
 	return auth.VerifySessionToken(cookie.Value, cfg.SessionSecret)
+}
+
+func (h *Handler) apiKeyOK(r *http.Request) bool {
+	if h.cfg.APIKey == "" {
+		return false
+	}
+	return r.Header.Get("Authorization") == "Bearer "+h.cfg.APIKey
+}
+
+// apiWriteAllowed returns true when the request is permitted to call a write
+// endpoint. When no API key is configured the server is in local-only mode and
+// all writes are allowed (backward-compatible). When an API key is configured,
+// the request must present either a valid session cookie or the API key.
+func (h *Handler) apiWriteAllowed(r *http.Request) bool {
+	if h.cfg.APIKey == "" {
+		return true
+	}
+	authCfg := h.loadAuthConfig()
+	if authCfg != nil && h.sessionOK(r) {
+		return true
+	}
+	return h.apiKeyOK(r)
 }
 
 func parseCookies(cookieHeader string) map[string]string {
@@ -687,7 +711,20 @@ func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, 200, map[string]any{"ok": true, "path": newRel})
 }
 
+func (h *Handler) handleReindex(w http.ResponseWriter, r *http.Request) {
+	if !h.apiWriteAllowed(r) {
+		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+		return
+	}
+	go docgen.ReindexAll(h.dgCfg)
+	sendJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
+	if !h.apiWriteAllowed(r) {
+		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -727,6 +764,10 @@ func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
+	if !h.apiWriteAllowed(r) {
+		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -1215,7 +1256,7 @@ func (h *Handler) handleShareCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleShareCreate(w http.ResponseWriter, r *http.Request) {
-	if !h.sessionOK(r) {
+	if !h.apiWriteAllowed(r) {
 		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
 		return
 	}

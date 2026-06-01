@@ -22,11 +22,13 @@ type Config struct {
 	CoherenceHome      string
 	AuthFile           string
 	SharesFile         string
-	RemoteUserHeader   string
+	RemoteUserHeader    string
 	RemoteUserJWTHeader string
-	AllowedUsers       []string
-	AllowedDomain      string
-	GuestAccess        bool
+	AllowedUsers        []string
+	AllowedDomain       string
+	GuestAccess         bool
+	APIKey              string
+	RemoteURL           string
 }
 
 func Load() *Config {
@@ -65,6 +67,8 @@ func Load() *Config {
 		AllowedUsers:        splitCSV(getenv("ALLOWED_USERS", "")),
 		AllowedDomain:       getenv("ALLOWED_DOMAIN", ""),
 		GuestAccess:         getenv("GUEST_ACCESS", "") == "true",
+		APIKey:              getenv("COHERENCE_API_KEY", ""),
+		RemoteURL:           strings.TrimRight(getenv("COHERENCE_REMOTE_URL", ""), "/"),
 	}
 }
 
