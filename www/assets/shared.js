@@ -556,15 +556,59 @@ function initEditMode() {
     const cancelBtn    = controls.querySelector("#ed-cancel");
     const statusEl     = controls.querySelector("#ed-status");
 
+    // Autosave state
+    let autosaveTimer = null;
+    let isDirty = false;
+
+    function markDirty() {
+      isDirty = true;
+      statusEl.textContent = "Unsaved changes";
+      statusEl.className   = "ed-header-status";
+      clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(doAutosave, 2000);
+    }
+
+    async function doAutosave() {
+      if (!isDirty) return;
+      const title   = titleEl.value.trim();
+      const content = contentEl.value;
+      statusEl.textContent = "Saving…";
+      statusEl.className   = "ed-header-status";
+      try {
+        const r = await fetch(_API + "/update-doc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folder, filename, title, content }),
+        });
+        if (r.ok) {
+          isDirty = false;
+          statusEl.textContent = "Autosaved";
+          statusEl.className   = "ed-header-status ok";
+          setTimeout(() => { if (!isDirty) statusEl.textContent = ""; }, 3000);
+        } else {
+          const d = await r.json().catch(() => ({}));
+          statusEl.textContent = "Autosave failed: " + (d.error || "server error");
+          statusEl.className   = "ed-header-status err";
+        }
+      } catch(e) {
+        statusEl.textContent = "Autosave failed";
+        statusEl.className   = "ed-header-status err";
+      }
+    }
+
+    titleEl.addEventListener("input", markDirty);
+    contentEl.addEventListener("input", markDirty);
+
     // Cancel
-    cancelBtn.addEventListener("click", exitEditMode);
+    cancelBtn.addEventListener("click", () => { clearTimeout(autosaveTimer); exitEditMode(); });
 
     // Escape to cancel
-    escHandler = (e) => { if (e.key === "Escape") { e.stopPropagation(); exitEditMode(); } };
+    escHandler = (e) => { if (e.key === "Escape") { e.stopPropagation(); clearTimeout(autosaveTimer); exitEditMode(); } };
     document.addEventListener("keydown", escHandler);
 
-    // Save
+    // Save (explicit — saves and reloads to render markdown)
     async function doSave() {
+      clearTimeout(autosaveTimer);
       const title   = titleEl.value.trim();
       const content = contentEl.value;
       saveBtn.disabled     = true;
@@ -583,6 +627,7 @@ function initEditMode() {
           saveBtn.disabled     = false;
           return;
         }
+        isDirty = false;
         statusEl.textContent = "Saved — reloading…";
         statusEl.className   = "ed-header-status ok";
         setTimeout(() => window.location.reload(), 800);
