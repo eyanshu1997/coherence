@@ -192,7 +192,7 @@ func regenerateFolderIndex(cfg *Config, folderPath string) {
 		preview := buildPreviewLines(subSubdirs, subDocs, 4)
 		cards = append(cards, fmt.Sprintf(
 			"    <div class=\"folder-card-wrap\">\n"+
-				"      <a href=\"%s/\" class=\"folder-card\" data-name=\"%s\" data-mtime=\"%d\">\n"+
+				"      <a href=\"/%s/%s/\" class=\"folder-card\" data-name=\"%s\" data-mtime=\"%d\">\n"+
 				"        <div class=\"folder-card-head\">\n"+
 				"          <span class=\"folder-name\">%s</span>\n"+
 				"          <span class=\"folder-count\">%d %s</span>\n"+
@@ -204,7 +204,7 @@ func regenerateFolderIndex(cfg *Config, folderPath string) {
 				"      <button class=\"folder-move-btn\" data-folder=\"%s\" title=\"Move this folder\">&#x2197;</button>\n"+
 				"      <button class=\"folder-delete-btn\" data-folder=\"%s\" title=\"Delete this folder\">&#x1F5D1;</button>\n"+
 				"    </div>",
-			sub.Name(), sub.Name(), latestTs*1000,
+			relFolder, sub.Name(), sub.Name(), latestTs*1000,
 			sub.Name(), childCount, noun, latestStr,
 			preview,
 			subSlug, subSlug, subSlug,

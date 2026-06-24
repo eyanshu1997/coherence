@@ -124,10 +124,6 @@ Do **not** continue to implementation until the user replies. The user may:
 
 Always use `--filename "plan.html"` (not a dated name) — overwritten on each revision so the URL stays stable.
 
-**Rule:** any time you report a doc URL to the user (gate message, fix summary, investigation link), generate a shareable link and provide both:
-- The shareable link (for sharing externally)
-- The direct link (for the user's own browser, already logged in)
-
 ---
 
 ## Re-generating the Plan
@@ -334,22 +330,6 @@ A clean run prints only `Generating single mermaid chart.`. Fix any parse error 
 5. **`graph LR/TD` with `subgraph` and no edges** — a subgraph with only disconnected nodes may look unexpected. Use chained edges (`A --> B --> C`) instead.
 
 ---
-
-## Shareable Links — Always Required for External URLs
-
-**Never use a bare `<DOC_BASE_URL>/...` URL in any context where someone else might click it** — PR descriptions, Jira comments, team messages, or links from one doc to another. These require browser authentication and will 404 for anyone not logged in.
-
-**This applies to cross-doc links too.** Any `[text](url)` link inside a doc that points to another doc on this server must use a share token.
-
-Generate share tokens with the `coherence-doc share` command:
-
-```bash
-"${COHERENCE_HOME}/bin/coherence-doc" share --days 365 /repo-a/PROJ-XXXXX/plan.html
-```
-
-Run one call per destination path. Use `--days 365` for long-lived documents, `--days 30` for short-term shares.
-
-The share token is appended as a query parameter: `?share=<token>`. The server validates the token and serves the page without requiring login.
 
 - coherence-server and nginx are managed separately — do not check or restart them as part of doc generation.
 - If a URL is not reachable, that is an infra issue for the user to address independently — just report the expected URL and move on.
