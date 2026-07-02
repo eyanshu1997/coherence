@@ -29,6 +29,7 @@ type Config struct {
 	GuestAccess         bool
 	APIKey              string
 	RemoteURL           string
+	SkipTLSVerify       bool
 }
 
 func Load() *Config {
@@ -69,6 +70,7 @@ func Load() *Config {
 		GuestAccess:         getenv("GUEST_ACCESS", "") == "true",
 		APIKey:              getenv("COHERENCE_API_KEY", ""),
 		RemoteURL:           strings.TrimRight(getenv("COHERENCE_REMOTE_URL", ""), "/"),
+		SkipTLSVerify:       getenv("COHERENCE_SKIP_TLS_VERIFY", "") == "true",
 	}
 }
 
