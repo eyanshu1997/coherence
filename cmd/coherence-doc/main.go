@@ -6,6 +6,7 @@ import (
 	"coherence/internal/config"
 	"coherence/internal/docgen"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -239,7 +240,15 @@ func remotePost(cfg *config.Config, path string, payload map[string]any) (map[st
 	if cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := http.DefaultClient
+	if cfg.SkipTLSVerify {
+		client = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			},
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
