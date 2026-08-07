@@ -80,10 +80,11 @@ function initCopyButtons() {
 }
 
 // ── comment API ───────────────────────────────────────────────────────────
-async function postComment(text, quote) {
+async function postComment(text, quote, range) {
   if (!COMMENTS_ENABLED) return;
   const body = { folder: FOLDER, file: FILE, text };
   if (quote) body.quote = quote;
+  if (range) body.range = range;
   const r = await fetch(`${API}/comment`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -103,57 +104,107 @@ async function postThreadReply(parentTs, text) {
 }
 
 // ── inline highlight marks ─────────────────────────────────────────────────
-// Map from comment ts → mark element(s) in the doc body.
+// Map from comment ts → mark element in the doc body.
 const marksByTs = {};
 
 function clearMarks() {
-  document.querySelectorAll("mark.inline-comment-mark").forEach(mark => {
-    mark.replaceWith(...mark.childNodes);
+  Array.from(document.querySelectorAll("mark.inline-comment-mark")).forEach(mark => {
+    mark.replaceWith(...Array.from(mark.childNodes));
   });
   Object.keys(marksByTs).forEach(k => delete marksByTs[k]);
 }
 
-function applyMark(comment) {
-  if (!comment.quote) return;
-  const content = document.querySelector(".content");
-  if (!content) return;
-  const needle = comment.quote;
+// ── Range path serialization ──────────────────────────────────────────────
+// A "path" is an array of childNode indices from root down to the target node.
+// This survives any DOM structure — code blocks, headers, nested elements.
 
-  // Build a flat list of all text nodes in document order, skipping existing marks.
+function nodeToPath(root, node) {
+  const path = [];
+  let cur = node;
+  while (cur && cur !== root) {
+    const parent = cur.parentNode;
+    if (!parent) return null;
+    path.unshift(Array.from(parent.childNodes).indexOf(cur));
+    cur = parent;
+  }
+  return cur === root ? path : null;
+}
+
+function pathToNode(root, path) {
+  let cur = root;
+  for (const idx of path) {
+    if (!cur.childNodes[idx]) return null;
+    cur = cur.childNodes[idx];
+  }
+  return cur;
+}
+
+function serializeRange(sel) {
+  const content = document.querySelector(".content");
+  if (!content || !sel || sel.rangeCount === 0) return null;
+  const r = sel.getRangeAt(0);
+  if (!content.contains(r.startContainer) || !content.contains(r.endContainer)) return null;
+  const sc = nodeToPath(content, r.startContainer);
+  const ec = nodeToPath(content, r.endContainer);
+  if (!sc || !ec) return null;
+  return { sc, so: r.startOffset, ec, eo: r.endOffset };
+}
+
+function restoreRange(rangeData) {
+  const content = document.querySelector(".content");
+  if (!content || !rangeData) return null;
+  const startNode = pathToNode(content, rangeData.sc);
+  const endNode   = pathToNode(content, rangeData.ec);
+  if (!startNode || !endNode) return null;
+  try {
+    const r = document.createRange();
+    r.setStart(startNode, rangeData.so);
+    r.setEnd(endNode, rangeData.eo);
+    return r;
+  } catch(e) { return null; }
+}
+
+// ── text-search fallback for old comments without range data ──────────────
+function findRangeByText(needle) {
+  const content = document.querySelector(".content");
+  if (!content) return null;
   const textNodes = [];
   const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
-      if (node.parentElement.closest("mark.inline-comment-mark")) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
+      return node.parentElement.closest("mark.inline-comment-mark")
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
     }
   });
   let n;
   while ((n = walker.nextNode())) textNodes.push(n);
 
-  // Concatenate all text content without separators so cross-element quotes match.
-  // Each entry: { node, start, end } tracks each node's slice of the concat string.
   let concat = "";
   const spans = [];
   for (const tn of textNodes) {
     spans.push({ node: tn, start: concat.length, end: concat.length + tn.nodeValue.length });
     concat += tn.nodeValue;
   }
-
   const idx = concat.indexOf(needle);
-  if (idx === -1) return; // quote not found in visible text
-
+  if (idx === -1) return null;
   const end = idx + needle.length;
-
-  // Find which text nodes the match spans.
   const affected = spans.filter(s => s.start < end && s.end > idx);
-  if (!affected.length) return;
+  if (!affected.length) return null;
+  const first = affected[0], last = affected[affected.length - 1];
+  try {
+    const r = document.createRange();
+    r.setStart(first.node, idx - first.start);
+    r.setEnd(last.node, Math.min(end - last.start, last.node.nodeValue.length));
+    return r;
+  } catch(e) { return null; }
+}
 
-  // Use document Range to surround the matched content with a <mark>.
-  const range = document.createRange();
-  const first = affected[0];
-  const last  = affected[affected.length - 1];
-  range.setStart(first.node, idx - first.start);
-  range.setEnd(last.node, Math.min(end - last.start, last.node.nodeValue.length));
+function applyMark(comment) {
+  if (!comment.quote) return;
+
+  // Try stored range path first, fall back to text search.
+  let range = comment.range ? restoreRange(comment.range) : null;
+  if (!range) range = findRangeByText(comment.quote);
+  if (!range) return;
 
   const mark = document.createElement("mark");
   mark.className = "inline-comment-mark";
@@ -161,13 +212,10 @@ function applyMark(comment) {
   try {
     range.surroundContents(mark);
   } catch(e) {
-    // Range crosses element boundaries — extract and rewrap contents.
     mark.appendChild(range.extractContents());
     range.insertNode(mark);
   }
-
-  marksByTs[comment.ts] = marksByTs[comment.ts] || [];
-  marksByTs[comment.ts].push(mark);
+  marksByTs[comment.ts] = [mark];
   mark.addEventListener("click", (e) => {
     e.stopPropagation();
     openInlinePanel(comment.ts);
@@ -300,8 +348,8 @@ function renderComments(comments) {
   _allComments = comments || [];
   clearMarks();
 
-  // apply inline marks for quoted comments
-  _allComments.forEach(c => { if (c.quote) applyMark(c); });
+  // apply inline marks for quoted comments — isolated per comment so one failure doesn't block render
+  _allComments.forEach(c => { if (c.quote) { try { applyMark(c); } catch(e) { console.warn("inline mark failed", e); } } });
 
   const list = document.getElementById("comment-list");
   if (!list) return;
@@ -431,6 +479,7 @@ const popInput = document.getElementById("pop-input");
 const popStat  = document.getElementById("pop-status");
 
 let pendingQuote = "";
+let pendingRange = null; // serialized Range path
 
 function popClose() {
   if (popover) popover.style.display = "none";
@@ -438,6 +487,7 @@ function popClose() {
   if (popInput) popInput.value = "";
   if (popStat)  { popStat.textContent = "⌘↵ to save"; popStat.className = ""; }
   pendingQuote = "";
+  pendingRange = null;
 }
 
 document.addEventListener("mouseup", (e) => {
@@ -463,6 +513,7 @@ document.addEventListener("mouseup", (e) => {
       chip.style.display = "flex";
     }
     pendingQuote = text.length > 120 ? text.slice(0, 117) + "…" : text;
+    pendingRange = serializeRange(sel);
   }, 10);
 });
 
@@ -509,7 +560,7 @@ async function popSave() {
   if (!text) return;
   if (popStat) { popStat.textContent = "Saving…"; popStat.className = ""; }
   try {
-    await postComment(text, pendingQuote);
+    await postComment(text, pendingQuote, pendingRange);
     if (popStat) { popStat.textContent = "Saved ✓"; popStat.className = "ok"; }
     await loadComments();
     setTimeout(popClose, 800);

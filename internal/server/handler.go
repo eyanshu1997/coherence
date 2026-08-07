@@ -291,6 +291,9 @@ func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
 	if quote != "" {
 		entry["quote"] = quote
 	}
+	if rangeData, ok := body["range"]; ok && rangeData != nil {
+		entry["range"] = rangeData
+	}
 	comments = append(comments, entry)
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
