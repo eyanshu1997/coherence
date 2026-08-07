@@ -112,6 +112,9 @@ function clearMarks() {
     mark.replaceWith(...Array.from(mark.childNodes));
   });
   Object.keys(marksByTs).forEach(k => delete marksByTs[k]);
+  // Rejoin text nodes split by surroundContents so paths are valid on the next render pass.
+  const content = document.querySelector(".content");
+  if (content) content.normalize();
 }
 
 // ── Range path serialization ──────────────────────────────────────────────
@@ -139,48 +142,113 @@ function pathToNode(root, path) {
   return cur;
 }
 
+function lastTextNodeBefore(root, container, offset) {
+  // Find the last text node that is strictly before container[offset] in document order.
+  // We do this by collecting all text nodes and finding the last one inside the range.
+  const all = [];
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = tw.nextNode())) all.push(n);
+  // The boundary position: create a collapsed range at container[offset]
+  const boundary = document.createRange();
+  boundary.setStart(container, offset);
+  boundary.collapse(true);
+  // Walk backward through text nodes to find the last one that ends at or before boundary
+  for (let i = all.length - 1; i >= 0; i--) {
+    const tn = all[i];
+    const cmp = boundary.compareBoundaryPoints(Range.START_TO_START,
+      (() => { const r = document.createRange(); r.setStart(tn, 0); return r; })());
+    if (cmp >= 0) return tn;
+  }
+  return null;
+}
+
+// Returns the nearest block-level ancestor of node within root, or root if none.
+const BLOCK_TAGS = new Set(['P','DIV','LI','H1','H2','H3','H4','H5','H6','TD','TH','BLOCKQUOTE','PRE','DT','DD']);
+function closestBlock(node, root) {
+  let n = node;
+  while (n && n !== root) {
+    if (BLOCK_TAGS.has(n.nodeName)) return n;
+    n = n.parentNode;
+  }
+  return root;
+}
+
 function serializeRange(sel) {
   const content = document.querySelector(".content");
   if (!content || !sel || sel.rangeCount === 0) return null;
-  let r = sel.getRangeAt(0).cloneRange();
+  const r = sel.getRangeAt(0);
   if (!content.contains(r.startContainer) || !content.contains(r.endContainer)) return null;
-  // Ensure both endpoints land on text nodes, not element boundaries.
-  // An eo=0 on an element node means "just before first child" — collapse back to prev text.
-  if (r.endContainer.nodeType !== Node.TEXT_NODE) {
-    r.setEnd(r.endContainer, r.endOffset);
-    // walk backward to the last text node before the boundary
-    const tw = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-    tw.currentNode = r.endContainer;
-    const prev = tw.previousNode();
-    if (!prev) return null;
-    r.setEnd(prev, prev.nodeValue.length);
+
+  let startNode = r.startContainer, startOffset = r.startOffset;
+  let endNode   = r.endContainer,   endOffset   = r.endOffset;
+
+  // If start is not a text node, find the first text node inside it at the offset
+  if (startNode.nodeType !== Node.TEXT_NODE) {
+    const child = startNode.childNodes[startOffset];
+    const tw = document.createTreeWalker(child || startNode, NodeFilter.SHOW_TEXT);
+    const first = tw.nextNode();
+    if (!first) return null;
+    startNode = first; startOffset = 0;
   }
-  if (r.startContainer.nodeType !== Node.TEXT_NODE) return null;
-  const sc = nodeToPath(content, r.startContainer);
-  const ec = nodeToPath(content, r.endContainer);
+
+  // If end is not a text node, walk back to the last text node before the boundary
+  if (endNode.nodeType !== Node.TEXT_NODE) {
+    const prev = lastTextNodeBefore(content, endNode, endOffset);
+    if (!prev) return null;
+    endNode = prev; endOffset = prev.nodeValue.length;
+  }
+
+  // If end falls outside start's block ancestor, snap it back to the end of that block.
+  // This prevents storing a cross-element range that surroundContents cannot wrap.
+  const startBlock = closestBlock(startNode, content);
+  if (!startBlock.contains(endNode)) {
+    const tw = document.createTreeWalker(startBlock, NodeFilter.SHOW_TEXT);
+    let last = null, n;
+    while ((n = tw.nextNode())) last = n;
+    if (!last) return null;
+    endNode = last; endOffset = last.nodeValue.length;
+  }
+
+  const sc = nodeToPath(content, startNode);
+  const ec = nodeToPath(content, endNode);
   if (!sc || !ec) return null;
-  return { sc, so: r.startOffset, ec, eo: r.endOffset };
+  return { sc, so: startOffset, ec, eo: endOffset };
 }
 
 function restoreRange(rangeData) {
   const content = document.querySelector(".content");
   if (!content || !rangeData) return null;
-  const startNode = pathToNode(content, rangeData.sc);
-  const endNode   = pathToNode(content, rangeData.ec);
+  let startNode = pathToNode(content, rangeData.sc);
+  let endNode   = pathToNode(content, rangeData.ec);
   if (!startNode || !endNode) return null;
+  let so = rangeData.so, eo = rangeData.eo;
+  // Snap non-text endpoints to nearest text nodes
+  if (startNode.nodeType !== Node.TEXT_NODE) {
+    const tw = document.createTreeWalker(startNode, NodeFilter.SHOW_TEXT);
+    startNode = tw.nextNode();
+    so = 0;
+    if (!startNode) return null;
+  }
+  if (endNode.nodeType !== Node.TEXT_NODE) {
+    const prev = lastTextNodeBefore(content, endNode, eo);
+    if (!prev) return null;
+    endNode = prev; eo = prev.nodeValue.length;
+  }
   try {
     const r = document.createRange();
-    r.setStart(startNode, rangeData.so);
-    r.setEnd(endNode, rangeData.eo);
+    r.setStart(startNode, so);
+    r.setEnd(endNode, eo);
+    if (r.collapsed) return null;
     return r;
   } catch(e) { return null; }
 }
 
-function applyMark(comment) {
+function applyMark(comment, preResolvedRange) {
   // Only apply marks for comments that have a stored range path.
   // Old quote-only comments (no range) fall through to the bottom list instead.
   if (!comment.range) return;
-  const range = restoreRange(comment.range);
+  const range = preResolvedRange !== undefined ? preResolvedRange : restoreRange(comment.range);
   if (!range) return;
 
   const mark = document.createElement("mark");
@@ -324,8 +392,12 @@ function renderComments(comments) {
   _allComments = comments || [];
   clearMarks();
 
-  // apply inline marks for quoted comments — isolated per comment so one failure doesn't block render
-  _allComments.forEach(c => { if (c.quote) { try { applyMark(c); } catch(e) { console.warn("inline mark failed", e); } } });
+  // Resolve all ranges before mutating the DOM (surroundContents splits text nodes and shifts indices).
+  // Phase 1: resolve; Phase 2: apply — so each applyMark sees the pristine DOM.
+  const resolved = _allComments.map(c => c.range ? restoreRange(c.range) : null);
+  _allComments.forEach((c, i) => {
+    if (c.range) { try { applyMark(c, resolved[i]); } catch(e) { console.warn("inline mark failed", e); } }
+  });
 
   const list = document.getElementById("comment-list");
   if (!list) return;
