@@ -25,6 +25,9 @@ import (
 )
 
 const sessionTTL = 86400 * 15 // 15 days
+
+// matches /assets/foo.js?vNN or /assets/foo.css?vNN — used to rewrite stale versions in served HTML
+var assetVerRe = regexp.MustCompile(`(/assets/[^"?]+\?)v\d+`)
 const maxUploadBytes = 50 * 1024 * 1024
 const maxImageBytes = 10 * 1024 * 1024
 
@@ -114,6 +117,8 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleShareCreate(w, r)
 		case "/reply-comment":
 			h.handleReplyComment(w, r)
+		case "/add-reply":
+			h.handleAddReply(w, r)
 		case "/create-folder":
 			h.handleCreateFolder(w, r)
 		case "/rename-folder":
@@ -286,6 +291,9 @@ func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
 	if quote != "" {
 		entry["quote"] = quote
 	}
+	if rangeData, ok := body["range"]; ok && rangeData != nil {
+		entry["range"] = rangeData
+	}
 	comments = append(comments, entry)
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
@@ -375,6 +383,68 @@ func (h *Handler) handleReplyComment(w http.ResponseWriter, r *http.Request) {
 			c["reply_ts"] = replyTs
 			c["reply_author"] = replyAuthor
 			c["handled"] = true
+			matched++
+		}
+	}
+	if matched == 0 {
+		sendJSON(w, 404, map[string]any{"error": "comment not found"})
+		return
+	}
+	out, _ := json.MarshalIndent(comments, "", "  ")
+	os.WriteFile(p, out, 0644)
+	sendJSON(w, 200, map[string]any{"ok": true, "reply_ts": replyTs})
+}
+
+// handleAddReply appends a user reply to the replies[] array of a comment identified by ts.
+// Any authenticated user (session or local) may reply; this is a peer thread, not a Claude reply.
+func (h *Handler) handleAddReply(w http.ResponseWriter, r *http.Request) {
+	isLocal := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:")
+	if !isLocal && !h.sessionOK(r) {
+		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
+		return
+	}
+	folder := str(body["folder"])
+	file := str(body["file"])
+	ts := str(body["ts"])
+	text := strings.TrimSpace(str(body["text"]))
+	if folder == "" || file == "" || ts == "" || text == "" {
+		sendJSON(w, 400, map[string]any{"error": "folder, file, ts, and text required"})
+		return
+	}
+	p := safeCommentPath(h.cfg.DataDir, folder, file)
+	if p == "" {
+		sendJSON(w, 404, map[string]any{"error": "comment file not found"})
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		sendJSON(w, 404, map[string]any{"error": "comment file not found"})
+		return
+	}
+	var comments []map[string]any
+	json.Unmarshal(data, &comments)
+	replyTs := time.Now().UTC().Format(time.RFC3339)
+	author := h.currentUser(r)
+	matched := 0
+	for _, c := range comments {
+		if c["ts"] == ts {
+			var replies []any
+			if existing, ok := c["replies"]; ok {
+				if arr, ok := existing.([]any); ok {
+					replies = arr
+				}
+			}
+			replies = append(replies, map[string]any{
+				"ts":     replyTs,
+				"text":   text,
+				"author": author,
+			})
+			c["replies"] = replies
 			matched++
 		}
 	}
@@ -1469,6 +1539,8 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 		ownerJSON, _ := json.Marshal(isOwner)
 		inject := []byte(`<script>window.REMOTE_USER=` + string(userJSON) + `;window.IS_OWNER=` + string(ownerJSON) + `;</script>`)
 		data = bytes.Replace(data, []byte("</head>"), append(inject, []byte("</head>")...), 1)
+		// Rewrite stale asset version query params so cached HTML always loads current JS/CSS.
+		data = assetVerRe.ReplaceAll(data, []byte(`${1}`+docgen.AssetVer))
 	}
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
