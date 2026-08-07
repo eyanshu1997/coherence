@@ -706,6 +706,148 @@ table.doc-table tr:nth-child(even) td { background: var(--surface); }
 }
 .comment-reply-text { color: var(--fg, #cdd6f4); }
 
+/* ── thread replies ──────────────────────────────────────────────────────── */
+.thread-replies {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.thread-reply {
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  background: var(--surface);
+  border-left: 2px solid var(--surface3);
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+}
+.thread-reply:last-child { margin-bottom: 0; }
+.thread-reply .comment-ts { margin-bottom: 3px; }
+.thread-reply-form {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+  display: none; /* hidden by default; shown on hover or focus */
+}
+.comment-item:hover .thread-reply-form,
+.comment-item:focus-within .thread-reply-form {
+  display: block;
+}
+.thread-reply-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 10px;
+  resize: none;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+.thread-reply-input::placeholder { color: var(--text3); }
+.thread-reply-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.thread-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+.thread-reply-submit {
+  background: var(--surface2, var(--surface));
+  border: 1px solid var(--border);
+  color: var(--text2);
+  border-radius: var(--radius);
+  padding: 4px 12px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.thread-reply-submit:hover { border-color: var(--accent); color: var(--accent); }
+.thread-reply-status { font-size: 11px; }
+.thread-reply-status.ok  { color: var(--green); }
+.thread-reply-status.err { color: var(--red); }
+
+/* ── inline comment marks ────────────────────────────────────────────────── */
+mark.inline-comment-mark {
+  background: color-mix(in srgb, var(--accent2, #6366f1) 18%, transparent);
+  color: inherit;
+  border-bottom: 1.5px solid var(--accent2, #6366f1);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.15s;
+  padding: 1px 0;
+}
+mark.inline-comment-mark:hover {
+  background: color-mix(in srgb, var(--accent2, #6366f1) 32%, transparent);
+}
+
+/* ── inline comment panel (floating) ────────────────────────────────────── */
+.inline-comment-panel {
+  position: absolute;
+  width: 320px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-lg);
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.icp-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.icp-quote {
+  flex: 1;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text3);
+  border-left: 2px solid var(--accent2);
+  padding: 3px 8px;
+  background: var(--accent2-dim);
+  border-radius: 0 3px 3px 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.icp-quote::before { content: '\201C'; }
+.icp-quote::after  { content: '\201D'; }
+.icp-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text3);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.icp-close:hover { color: var(--text); background: var(--surface2, var(--surface)); }
+.inline-comment-panel .thread-reply-form {
+  display: block; /* always visible in the panel */
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+@media print, body.print-mode {
+  mark.inline-comment-mark { background: none; border-bottom: none; }
+  .inline-comment-panel { display: none !important; }
+}
+
 /* ══════════════════════════════════════
    SELECTION POPOVER
    ══════════════════════════════════════ */
