@@ -164,46 +164,11 @@ function restoreRange(rangeData) {
   } catch(e) { return null; }
 }
 
-// ── text-search fallback for old comments without range data ──────────────
-function findRangeByText(needle) {
-  const content = document.querySelector(".content");
-  if (!content) return null;
-  const textNodes = [];
-  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      return node.parentElement.closest("mark.inline-comment-mark")
-        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-    }
-  });
-  let n;
-  while ((n = walker.nextNode())) textNodes.push(n);
-
-  let concat = "";
-  const spans = [];
-  for (const tn of textNodes) {
-    spans.push({ node: tn, start: concat.length, end: concat.length + tn.nodeValue.length });
-    concat += tn.nodeValue;
-  }
-  const idx = concat.indexOf(needle);
-  if (idx === -1) return null;
-  const end = idx + needle.length;
-  const affected = spans.filter(s => s.start < end && s.end > idx);
-  if (!affected.length) return null;
-  const first = affected[0], last = affected[affected.length - 1];
-  try {
-    const r = document.createRange();
-    r.setStart(first.node, idx - first.start);
-    r.setEnd(last.node, Math.min(end - last.start, last.node.nodeValue.length));
-    return r;
-  } catch(e) { return null; }
-}
-
 function applyMark(comment) {
-  if (!comment.quote) return;
-
-  // Try stored range path first, fall back to text search.
-  let range = comment.range ? restoreRange(comment.range) : null;
-  if (!range) range = findRangeByText(comment.quote);
+  // Only apply marks for comments that have a stored range path.
+  // Old quote-only comments (no range) fall through to the bottom list instead.
+  if (!comment.range) return;
+  const range = restoreRange(comment.range);
   if (!range) return;
 
   const mark = document.createElement("mark");
@@ -354,15 +319,15 @@ function renderComments(comments) {
   const list = document.getElementById("comment-list");
   if (!list) return;
 
-  // only doc-level comments (no quote) go in the bottom list
-  const docLevel = _allComments.filter(c => !c.quote);
+  // doc-level = no range (includes old quote-only comments for backward compat)
+  const docLevel = _allComments.filter(c => !c.range);
 
-  if (!docLevel.length && !_allComments.filter(c => c.quote).length) {
+  if (!_allComments.length) {
     list.innerHTML = '<p class="comments-empty">No comments yet.</p>';
     return;
   }
   if (!docLevel.length) {
-    list.innerHTML = '<p class="comments-empty">No document-level comments. Select text to add inline comments.</p>';
+    list.innerHTML = '';
     return;
   }
 
