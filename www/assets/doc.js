@@ -92,45 +92,303 @@ async function postComment(text, quote) {
   if (!r.ok) throw new Error("server error " + r.status);
 }
 
+async function postThreadReply(parentTs, text) {
+  if (!COMMENTS_ENABLED) return;
+  const r = await fetch(`${API}/add-reply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder: FOLDER, file: FILE, ts: parentTs, text }),
+  });
+  if (!r.ok) throw new Error("server error " + r.status);
+}
+
+// ── inline highlight marks ─────────────────────────────────────────────────
+// Map from comment ts → mark element(s) in the doc body.
+const marksByTs = {};
+
+function clearMarks() {
+  document.querySelectorAll("mark.inline-comment-mark").forEach(mark => {
+    const parent = mark.parentNode;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+  Object.keys(marksByTs).forEach(k => delete marksByTs[k]);
+}
+
+function applyMark(comment) {
+  if (!comment.quote) return;
+  const content = document.querySelector(".content");
+  if (!content) return;
+  const needle = comment.quote;
+
+  // Build a flat list of all text nodes in document order, skipping existing marks.
+  const textNodes = [];
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (node.parentElement.closest("mark.inline-comment-mark")) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  let n;
+  while ((n = walker.nextNode())) textNodes.push(n);
+
+  // Concatenate all text content with a sentinel so we can map char offsets back.
+  // Each entry: { node, start, end } in the concatenated string.
+  const SEP = "\x00"; // unlikely to appear in real content
+  let concat = "";
+  const spans = [];
+  for (const tn of textNodes) {
+    spans.push({ node: tn, start: concat.length, end: concat.length + tn.nodeValue.length });
+    concat += tn.nodeValue + SEP;
+  }
+
+  const idx = concat.indexOf(needle);
+  if (idx === -1) return; // quote not found in visible text
+
+  const end = idx + needle.length;
+
+  // Find which text nodes the match spans.
+  const affected = spans.filter(s => s.start < end && s.end > idx);
+  if (!affected.length) return;
+
+  // Use document Range to surround the matched content with a <mark>.
+  const range = document.createRange();
+  const first = affected[0];
+  const last  = affected[affected.length - 1];
+  range.setStart(first.node, idx - first.start);
+  range.setEnd(last.node, Math.min(end - last.start, last.node.nodeValue.length));
+
+  const mark = document.createElement("mark");
+  mark.className = "inline-comment-mark";
+  mark.dataset.commentTs = comment.ts;
+  try {
+    range.surroundContents(mark);
+  } catch(e) {
+    // Range crosses element boundaries — extract and rewrap contents.
+    mark.appendChild(range.extractContents());
+    range.insertNode(mark);
+  }
+
+  marksByTs[comment.ts] = marksByTs[comment.ts] || [];
+  marksByTs[comment.ts].push(mark);
+  mark.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openInlinePanel(comment.ts);
+  });
+}
+
+// ── inline comment panel ───────────────────────────────────────────────────
+let _allComments = [];
+
+function openInlinePanel(ts) {
+  closeInlinePanel();
+  const comment = _allComments.find(c => c.ts === ts);
+  if (!comment) return;
+  const marks = marksByTs[ts];
+  const anchor = marks && marks[0];
+
+  const panel = document.createElement("div");
+  panel.id = "inline-comment-panel";
+  panel.className = "inline-comment-panel";
+
+  const isHandled = comment.handled || comment.acknowledged;
+  const handledTs = comment.reply_ts || comment.ack_ts || "";
+  const badge = isHandled
+    ? `<span class="comment-ack-badge" title="Handled${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
+    : "";
+  const authorHtml = comment.author && comment.author !== "anonymous"
+    ? `<span class="comment-author">${escHtml(comment.author)}</span>` : "";
+
+  // Claude reply bubble (existing /reply-comment flow)
+  const claudeReplyHtml = comment.reply
+    ? `<div class="comment-reply">` +
+        `<span class="comment-reply-label">Claude:</span> ` +
+        `<span class="comment-reply-text">${escHtml(comment.reply)}</span>` +
+      `</div>`
+    : "";
+
+  // Thread replies (new /add-reply flow)
+  const repliesHtml = (comment.replies || []).map(rep => {
+    const repAuthor = rep.author && rep.author !== "anonymous"
+      ? `<span class="comment-author">${escHtml(rep.author)}</span>` : "";
+    return `<div class="thread-reply">` +
+      `<div class="comment-ts">${repAuthor}${fmtTs(rep.ts)}</div>` +
+      `<div class="comment-text">${escHtml(rep.text)}</div>` +
+    `</div>`;
+  }).join("");
+
+  panel.innerHTML =
+    `<div class="icp-header">` +
+      `<div class="icp-quote">${escHtml(comment.quote)}</div>` +
+      `<button class="icp-close" id="icp-close-btn">✕</button>` +
+    `</div>` +
+    `<div class="comment-item-header">` +
+      `<div class="comment-ts">${authorHtml}${fmtTs(comment.ts)}</div>` +
+      badge +
+    `</div>` +
+    `<div class="comment-text">${escHtml(comment.text)}</div>` +
+    claudeReplyHtml +
+    (repliesHtml ? `<div class="thread-replies">${repliesHtml}</div>` : "") +
+    `<div class="thread-reply-form">` +
+      `<textarea class="thread-reply-input" id="icp-reply-input" placeholder="Reply to this thread…" rows="2"></textarea>` +
+      `<div class="thread-reply-actions">` +
+        `<button class="thread-reply-submit" id="icp-reply-submit">Reply</button>` +
+        `<span class="comment-save-status" id="icp-reply-status"></span>` +
+      `</div>` +
+    `</div>`;
+
+  document.body.appendChild(panel);
+
+  // position near anchor mark
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect();
+    const pw = 320;
+    let left = rect.left + window.scrollX;
+    let top  = rect.bottom + window.scrollY + 8;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+    panel.style.left = `${Math.max(8, left)}px`;
+    panel.style.top  = `${top}px`;
+  }
+
+  document.getElementById("icp-close-btn").addEventListener("click", closeInlinePanel);
+
+  const replyInput  = document.getElementById("icp-reply-input");
+  const replySubmit = document.getElementById("icp-reply-submit");
+  const replyStatus = document.getElementById("icp-reply-status");
+
+  async function submitThreadReply() {
+    const text = replyInput.value.trim();
+    if (!text) return;
+    replyStatus.textContent = "Saving…";
+    replyStatus.className = "comment-save-status";
+    try {
+      await postThreadReply(ts, text);
+      replyStatus.textContent = "Saved ✓";
+      replyStatus.className = "comment-save-status ok";
+      await loadComments();
+      setTimeout(closeInlinePanel, 600);
+    } catch(e) {
+      replyStatus.textContent = "Error";
+      replyStatus.className = "comment-save-status err";
+    }
+  }
+
+  replySubmit.addEventListener("click", submitThreadReply);
+  replyInput.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submitThreadReply(); }
+    if (e.key === "Escape") { e.preventDefault(); closeInlinePanel(); }
+  });
+
+  // close on outside click
+  setTimeout(() => {
+    document.addEventListener("mousedown", icpOutsideClick);
+  }, 0);
+}
+
+function icpOutsideClick(e) {
+  const panel = document.getElementById("inline-comment-panel");
+  if (panel && !panel.contains(e.target) && !e.target.closest("mark.inline-comment-mark")) {
+    closeInlinePanel();
+  }
+}
+
+function closeInlinePanel() {
+  const panel = document.getElementById("inline-comment-panel");
+  if (panel) panel.remove();
+  document.removeEventListener("mousedown", icpOutsideClick);
+}
+
+// ── render comment list ────────────────────────────────────────────────────
 function renderComments(comments) {
+  _allComments = comments || [];
+  clearMarks();
+
+  // apply inline marks for quoted comments
+  _allComments.forEach(c => { if (c.quote) applyMark(c); });
+
   const list = document.getElementById("comment-list");
   if (!list) return;
-  if (!comments || !comments.length) {
+
+  // only doc-level comments (no quote) go in the bottom list
+  const docLevel = _allComments.filter(c => !c.quote);
+
+  if (!docLevel.length && !_allComments.filter(c => c.quote).length) {
     list.innerHTML = '<p class="comments-empty">No comments yet.</p>';
     return;
   }
-  list.innerHTML = comments.map(c => {
-    const quoteHtml = c.quote
-      ? `<div class="comment-quote">${escHtml(c.quote)}</div>`
-      : "";
+  if (!docLevel.length) {
+    list.innerHTML = '<p class="comments-empty">No document-level comments. Select text to add inline comments.</p>';
+    return;
+  }
+
+  list.innerHTML = docLevel.map(c => {
     const authorHtml = c.author && c.author !== "anonymous"
-      ? `<span class="comment-author">${escHtml(c.author)}</span>`
-      : "";
-    // handled supersedes acknowledged — show if either is set
+      ? `<span class="comment-author">${escHtml(c.author)}</span>` : "";
     const isHandled = c.handled || c.acknowledged;
     const handledTs = c.reply_ts || c.ack_ts || "";
     const badge = isHandled
       ? `<span class="comment-ack-badge" title="Handled by Claude${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
       : "";
     const itemClass = isHandled ? "comment-item comment-item-acked" : "comment-item";
-    const replyHtml = c.reply
+
+    const claudeReplyHtml = c.reply
       ? `<div class="comment-reply">` +
           `<span class="comment-reply-label">Claude:</span> ` +
           `<span class="comment-reply-text">${escHtml(c.reply)}</span>` +
         `</div>`
       : "";
+
+    const repliesHtml = (c.replies || []).map(rep => {
+      const repAuthor = rep.author && rep.author !== "anonymous"
+        ? `<span class="comment-author">${escHtml(rep.author)}</span>` : "";
+      return `<div class="thread-reply">` +
+        `<div class="comment-ts">${repAuthor}${fmtTs(rep.ts)}</div>` +
+        `<div class="comment-text">${escHtml(rep.text)}</div>` +
+      `</div>`;
+    }).join("");
+
+    const ts = escHtml(c.ts);
     return (
       `<div class="${itemClass}">` +
         `<div class="comment-item-header">` +
           `<div class="comment-ts">${authorHtml}${fmtTs(c.ts)}</div>` +
           badge +
         `</div>` +
-        quoteHtml +
         `<div class="comment-text">${escHtml(c.text)}</div>` +
-        replyHtml +
+        claudeReplyHtml +
+        (repliesHtml ? `<div class="thread-replies">${repliesHtml}</div>` : "") +
+        `<div class="thread-reply-form">` +
+          `<textarea class="thread-reply-input" data-parent-ts="${ts}" placeholder="Reply…" rows="2"></textarea>` +
+          `<div class="thread-reply-actions">` +
+            `<button class="thread-reply-submit" data-parent-ts="${ts}">Reply</button>` +
+            `<span class="comment-save-status thread-reply-status"></span>` +
+          `</div>` +
+        `</div>` +
       `</div>`
     );
   }).join("");
+
+  // wire reply buttons in the doc-level list
+  list.querySelectorAll(".thread-reply-submit").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const parentTs = btn.dataset.parentTs;
+      const item = btn.closest(".comment-item");
+      const input = item && item.querySelector(".thread-reply-input");
+      const status = item && item.querySelector(".thread-reply-status");
+      if (!input || !parentTs) return;
+      const text = input.value.trim();
+      if (!text) return;
+      if (status) { status.textContent = "Saving…"; status.className = "comment-save-status thread-reply-status"; }
+      try {
+        await postThreadReply(parentTs, text);
+        if (status) { status.textContent = "Saved ✓"; status.className = "comment-save-status thread-reply-status ok"; }
+        input.value = "";
+        await loadComments();
+      } catch(e) {
+        if (status) { status.textContent = "Error"; status.className = "comment-save-status thread-reply-status err"; }
+      }
+    });
+  });
 }
 
 async function loadComments() {
