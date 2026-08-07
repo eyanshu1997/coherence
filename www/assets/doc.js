@@ -112,6 +112,9 @@ function clearMarks() {
     mark.replaceWith(...Array.from(mark.childNodes));
   });
   Object.keys(marksByTs).forEach(k => delete marksByTs[k]);
+  // Rejoin text nodes split by surroundContents so paths are valid on the next render pass.
+  const content = document.querySelector(".content");
+  if (content) content.normalize();
 }
 
 // ── Range path serialization ──────────────────────────────────────────────
@@ -160,6 +163,17 @@ function lastTextNodeBefore(root, container, offset) {
   return null;
 }
 
+// Returns the nearest block-level ancestor of node within root, or root if none.
+const BLOCK_TAGS = new Set(['P','DIV','LI','H1','H2','H3','H4','H5','H6','TD','TH','BLOCKQUOTE','PRE','DT','DD']);
+function closestBlock(node, root) {
+  let n = node;
+  while (n && n !== root) {
+    if (BLOCK_TAGS.has(n.nodeName)) return n;
+    n = n.parentNode;
+  }
+  return root;
+}
+
 function serializeRange(sel) {
   const content = document.querySelector(".content");
   if (!content || !sel || sel.rangeCount === 0) return null;
@@ -183,6 +197,17 @@ function serializeRange(sel) {
     const prev = lastTextNodeBefore(content, endNode, endOffset);
     if (!prev) return null;
     endNode = prev; endOffset = prev.nodeValue.length;
+  }
+
+  // If end falls outside start's block ancestor, snap it back to the end of that block.
+  // This prevents storing a cross-element range that surroundContents cannot wrap.
+  const startBlock = closestBlock(startNode, content);
+  if (!startBlock.contains(endNode)) {
+    const tw = document.createTreeWalker(startBlock, NodeFilter.SHOW_TEXT);
+    let last = null, n;
+    while ((n = tw.nextNode())) last = n;
+    if (!last) return null;
+    endNode = last; endOffset = last.nodeValue.length;
   }
 
   const sc = nodeToPath(content, startNode);
@@ -219,11 +244,11 @@ function restoreRange(rangeData) {
   } catch(e) { return null; }
 }
 
-function applyMark(comment) {
+function applyMark(comment, preResolvedRange) {
   // Only apply marks for comments that have a stored range path.
   // Old quote-only comments (no range) fall through to the bottom list instead.
   if (!comment.range) return;
-  const range = restoreRange(comment.range);
+  const range = preResolvedRange !== undefined ? preResolvedRange : restoreRange(comment.range);
   if (!range) return;
 
   const mark = document.createElement("mark");
@@ -367,8 +392,12 @@ function renderComments(comments) {
   _allComments = comments || [];
   clearMarks();
 
-  // apply inline marks for quoted comments — isolated per comment so one failure doesn't block render
-  _allComments.forEach(c => { if (c.quote) { try { applyMark(c); } catch(e) { console.warn("inline mark failed", e); } } });
+  // Resolve all ranges before mutating the DOM (surroundContents splits text nodes and shifts indices).
+  // Phase 1: resolve; Phase 2: apply — so each applyMark sees the pristine DOM.
+  const resolved = _allComments.map(c => c.range ? restoreRange(c.range) : null);
+  _allComments.forEach((c, i) => {
+    if (c.range) { try { applyMark(c, resolved[i]); } catch(e) { console.warn("inline mark failed", e); } }
+  });
 
   const list = document.getElementById("comment-list");
   if (!list) return;

@@ -125,6 +125,69 @@ After loading, output a one-line summary:
 
 ---
 
+## Comment data model — what fields to expect
+
+Each comment in a `.comments.json` file is a JSON object. Fields:
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | RFC3339 timestamp — primary key |
+| `text` | The comment body |
+| `author` | Email or "anonymous" |
+| `quote` | Selected text excerpt (up to 120 chars) — present on inline comments |
+| `range` | DOM range path `{sc, so, ec, eo}` — present on **new-style inline comments** (see below) |
+| `acknowledged` | `true` when acknowledged via the API |
+| `ack_ts` | Timestamp of acknowledgement |
+| `reply` | Claude's reply text (posted via `/reply-comment`) |
+| `reply_ts` | Timestamp of Claude's reply |
+| `reply_author` | Who posted the Claude reply |
+| `handled` | `true` when a Claude reply has been posted |
+| `replies` | Array of user thread replies `[{ts, text, author}]` — posted via `/add-reply` |
+
+### Inline comments vs doc-level comments
+
+**Inline comments** have a `range` field. They are anchored to a specific span of text in the document body. The `quote` field contains the selected text for context.
+
+**Doc-level comments** have no `range` field. They appear at the bottom of the page. Old-style inline comments (those with `quote` but no `range`) are also treated as doc-level.
+
+### Thread replies (`replies` array)
+
+A comment may have a `replies` array — peer replies from users in a thread. These are separate from `reply`/`reply_ts` (which is Claude's reply via `/reply-comment`).
+
+When presenting comments to Claude:
+- Show `quote` for inline comments as the anchor context ("on: '...'")
+- Show `replies` as a sub-thread beneath the main comment
+- An inline comment with a `quote` should be addressed in context of that specific section of the doc
+- A comment with `reply` already set is handled — still surface it as context but note it's been addressed
+
+### How to reply to an inline comment
+
+Use the `/reply-comment` endpoint (requires auth):
+```bash
+curl -s -X POST "http://localhost:${COHERENCE_PORT}/reply-comment" \
+  -H "Content-Type: application/json" \
+  -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>", "reply": "<your reply text>"}'
+```
+
+This sets `reply`, `reply_ts`, `reply_author`, and `handled: true` on the comment — the user will see your reply as a "Claude:" bubble inline next to the highlighted text.
+
+### Presenting inline comments in context
+
+When a comment has a `quote`, present it with the doc section it belongs to in mind:
+```
+[INLINE on: "the fix applied to AWS only"]
+→ "Need to also handle Azure VNET case"
+  Thread: eygupta@cisco.com (2026-05-01): "Azure uses VNET peering, not TGW"
+```
+
+When a comment has no `quote`, it's a general note on the whole doc:
+```
+[DOC-LEVEL]
+→ "This whole section is outdated — gateway provisioning changed in v4.2"
+```
+
+---
+
 ## Notes
 
 - Only reads `.html` files — skips `index.html` (it's a navigation page, not a content doc)
