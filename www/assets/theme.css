@@ -693,18 +693,18 @@ table.doc-table tr:nth-child(even) td { background: var(--surface); }
 .comment-reply {
   margin-top: 8px;
   padding: 7px 10px;
-  background: var(--accent-dim, rgba(99,102,241,0.08));
-  border-left: 3px solid var(--accent2, #6366f1);
+  background: var(--accent2-dim);
+  border-left: 3px solid var(--accent2);
   border-radius: 0 6px 6px 0;
   font-size: 13px;
-  color: var(--fg-muted, #888);
+  color: var(--text2);
 }
 .comment-reply-label {
   font-weight: 700;
-  color: var(--accent2, #6366f1);
+  color: var(--accent2);
   margin-right: 4px;
 }
-.comment-reply-text { color: var(--fg, #cdd6f4); }
+.comment-reply-text { color: var(--text); }
 
 /* ── thread replies ──────────────────────────────────────────────────────── */
 .thread-replies {
