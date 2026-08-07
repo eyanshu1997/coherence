@@ -1,7 +1,7 @@
 package docgen
 
 // AssetVer is injected at build time via -ldflags "-X coherence/internal/docgen.AssetVer=vNN"
-var AssetVer = "v43"
+var AssetVer = "v44"
 
 const logoSVG = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="4" y="2" width="11" height="14" rx="2" fill="#0969da" opacity="0.15"/><rect x="4" y="2" width="11" height="14" rx="2" stroke="#0969da" stroke-width="1.5"/><rect x="7" y="6" width="14" height="14" rx="2" fill="#ffffff" stroke="#0969da" stroke-width="1.5"/><path d="M13 10.5l-2.5 3.5h2l-1 3.5 3.5-4.5h-2.2l1.2-2.5z" fill="#0969da"/></svg>`
 
@@ -71,7 +71,7 @@ const docTemplate = `<!DOCTYPE html>
     <button id="sel-chip">&#x1F4AC; Add comment</button>
     <div id="sel-popover">
       <div class="pop-quote-box" id="pop-quote"></div>
-      <textarea id="pop-input" placeholder="Your note for Claude&#x2026;" rows="3"></textarea>
+      <textarea id="pop-input" placeholder="Add a note&#x2026;" rows="3"></textarea>
       <div class="pop-actions">
         <button class="pop-save" id="pop-save-btn">Save</button>
         <button class="pop-cancel" id="pop-cancel-btn">Cancel</button>
@@ -82,11 +82,11 @@ const docTemplate = `<!DOCTYPE html>
     <div class="comments-section">
       <div class="comments-header">
         <span class="comments-title">Comments &amp; Feedback</span>
-        <span class="comments-hint">Select text to add inline &mdash; or type below. Read by Claude via <code id="comments-load-cmd">/load-doc</code><script>document.getElementById("comments-load-cmd").textContent="/load-doc "+(window.DOC_FOLDER||"");</script></span>
+        <span class="comments-hint">Select text to add inline &mdash; or type below. Load via <code id="comments-load-cmd">/load-doc</code><script>document.getElementById("comments-load-cmd").textContent="/load-doc "+(window.DOC_FOLDER||"");</script></span>
       </div>
       <div class="comment-list" id="comment-list"></div>
       <div class="comment-form">
-        <textarea id="comment-input" placeholder="Add a note or instruction for Claude&#x2026;"></textarea>
+        <textarea id="comment-input" placeholder="Add a note or feedback&#x2026;"></textarea>
         <div class="comment-form-footer">
           <button class="comment-submit" id="comment-submit-btn">Add Comment</button>
           <span class="comment-save-status" id="comment-status"></span>

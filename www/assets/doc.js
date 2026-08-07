@@ -301,7 +301,7 @@ function openInlinePanel(ts) {
   // Claude reply bubble (existing /reply-comment flow)
   const claudeReplyHtml = comment.reply
     ? `<div class="comment-reply">` +
-        `<span class="comment-reply-label">Claude:</span> ` +
+        `<span class="comment-reply-label">Reply:</span> ` +
         `<span class="comment-reply-text">${escHtml(comment.reply)}</span>` +
       `</div>`
     : "";
@@ -419,7 +419,7 @@ function buildCommentItemHtml(c, opts) {
   const isHandled = c.handled || c.acknowledged;
   const handledTs = c.reply_ts || c.ack_ts || "";
   const badge = isHandled
-    ? `<span class="comment-ack-badge" title="Handled by Claude${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
+    ? `<span class="comment-ack-badge" title="Handled${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
     : "";
   const itemClass = (isHandled ? "comment-item comment-item-acked" : "comment-item") +
                     (stale ? " comment-item-stale" : "");
@@ -430,7 +430,7 @@ function buildCommentItemHtml(c, opts) {
 
   const claudeReplyHtml = c.reply
     ? `<div class="comment-reply">` +
-        `<span class="comment-reply-label">Claude:</span> ` +
+        `<span class="comment-reply-label">Reply:</span> ` +
         `<span class="comment-reply-text">${escHtml(c.reply)}</span>` +
       `</div>`
     : "";
@@ -474,18 +474,26 @@ function renderComments(comments) {
   _allComments = comments || [];
   clearMarks();
 
-  // Resolve all ranges before mutating the DOM (surroundContents splits text nodes and shifts indices).
-  // Phase 1: resolve; Phase 2: apply — so each applyMark sees the pristine DOM.
+  // Phase 1: resolve all ranges before any DOM mutation.
   const resolved = _allComments.map(c => c.range ? restoreRange(c.range) : null);
+
+  // Phase 2: apply marks; track which ones actually succeeded.
+  const marked = new Set();
   _allComments.forEach((c, i) => {
-    if (c.range) { try { applyMark(c, resolved[i]); } catch(e) { console.warn("inline mark failed", e); } }
+    if (c.range && resolved[i]) {
+      try {
+        applyMark(c, resolved[i]);
+        // applyMark succeeds only if surroundContents didn't throw AND mark is in DOM
+        if (marksByTs[c.ts]) marked.add(c.ts);
+      } catch(e) { console.warn("inline mark failed", e); }
+    }
   });
 
   const list = document.getElementById("comment-list");
   if (!list) return;
 
-  // Bottom list = doc-level (no range) + stale inline (range stored but unresolvable after doc update)
-  const bottomList = _allComments.filter((c, i) => !c.range || !resolved[i]);
+  // Bottom list = doc-level (no range) + stale inline (range present but mark didn't render)
+  const bottomList = _allComments.filter(c => !marked.has(c.ts));
 
   if (!_allComments.length) {
     list.innerHTML = '<p class="comments-empty">No comments yet.</p>';
@@ -496,8 +504,8 @@ function renderComments(comments) {
     return;
   }
 
-  list.innerHTML = bottomList.map((c, i) => {
-    const stale = !!(c.range && !resolved[_allComments.indexOf(c)]);
+  list.innerHTML = bottomList.map(c => {
+    const stale = !!(c.range); // has a range but failed to mark = stale
     return buildCommentItemHtml(c, { stale });
   }).join("");
 
