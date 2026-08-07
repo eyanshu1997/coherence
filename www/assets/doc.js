@@ -142,8 +142,20 @@ function pathToNode(root, path) {
 function serializeRange(sel) {
   const content = document.querySelector(".content");
   if (!content || !sel || sel.rangeCount === 0) return null;
-  const r = sel.getRangeAt(0);
+  let r = sel.getRangeAt(0).cloneRange();
   if (!content.contains(r.startContainer) || !content.contains(r.endContainer)) return null;
+  // Ensure both endpoints land on text nodes, not element boundaries.
+  // An eo=0 on an element node means "just before first child" — collapse back to prev text.
+  if (r.endContainer.nodeType !== Node.TEXT_NODE) {
+    r.setEnd(r.endContainer, r.endOffset);
+    // walk backward to the last text node before the boundary
+    const tw = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    tw.currentNode = r.endContainer;
+    const prev = tw.previousNode();
+    if (!prev) return null;
+    r.setEnd(prev, prev.nodeValue.length);
+  }
+  if (r.startContainer.nodeType !== Node.TEXT_NODE) return null;
   const sc = nodeToPath(content, r.startContainer);
   const ec = nodeToPath(content, r.endContainer);
   if (!sc || !ec) return null;
@@ -177,8 +189,7 @@ function applyMark(comment) {
   try {
     range.surroundContents(mark);
   } catch(e) {
-    mark.appendChild(range.extractContents());
-    range.insertNode(mark);
+    return; // range crosses element boundaries we can't safely wrap — skip mark
   }
   marksByTs[comment.ts] = [mark];
   mark.addEventListener("click", (e) => {
