@@ -108,9 +108,7 @@ const marksByTs = {};
 
 function clearMarks() {
   document.querySelectorAll("mark.inline-comment-mark").forEach(mark => {
-    const parent = mark.parentNode;
-    parent.replaceChild(document.createTextNode(mark.textContent), mark);
-    parent.normalize();
+    mark.replaceWith(...mark.childNodes);
   });
   Object.keys(marksByTs).forEach(k => delete marksByTs[k]);
 }
@@ -132,14 +130,13 @@ function applyMark(comment) {
   let n;
   while ((n = walker.nextNode())) textNodes.push(n);
 
-  // Concatenate all text content with a sentinel so we can map char offsets back.
-  // Each entry: { node, start, end } in the concatenated string.
-  const SEP = "\x00"; // unlikely to appear in real content
+  // Concatenate all text content without separators so cross-element quotes match.
+  // Each entry: { node, start, end } tracks each node's slice of the concat string.
   let concat = "";
   const spans = [];
   for (const tn of textNodes) {
     spans.push({ node: tn, start: concat.length, end: concat.length + tn.nodeValue.length });
-    concat += tn.nodeValue + SEP;
+    concat += tn.nodeValue;
   }
 
   const idx = concat.indexOf(needle);
