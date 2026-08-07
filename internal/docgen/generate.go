@@ -114,6 +114,11 @@ func GenerateDoc(cfg *Config, folder, title, content, filename string) (string, 
 	}
 	os.Chmod(outPath, 0644)
 
+	// Invalidate inline range anchors: regenerating the doc changes the DOM so all
+	// stored range paths are stale. Strip the range field from every comment so they
+	// fall through to the doc-level list instead of silently failing to highlight.
+	invalidateInlineRanges(folderPath, strings.TrimSuffix(filename, ".html"))
+
 	// regenerate all ancestor indexes
 	p := folderPath
 	for p != cfg.DataDir && p != filepath.Dir(p) {
@@ -126,6 +131,33 @@ func GenerateDoc(cfg *Config, folder, title, content, filename string) (string, 
 	url := fmt.Sprintf("%s/%s/%s", cfg.DocBase, folder, filename)
 	fmt.Printf("Document written: %s\nURL: %s\n", outPath, url)
 	return url, nil
+}
+
+// invalidateInlineRanges strips the range field from all comments for a doc after
+// regeneration. The quote is preserved so the comment still shows context in the
+// doc-level list. Only range is removed — the DOM has changed so the path is stale.
+func invalidateInlineRanges(folderPath, stem string) {
+	p := filepath.Join(folderPath, stem+".comments.json")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return // no comments file — nothing to do
+	}
+	var comments []map[string]any
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return
+	}
+	changed := false
+	for _, c := range comments {
+		if _, hasRange := c["range"]; hasRange {
+			delete(c, "range")
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	out, _ := json.MarshalIndent(comments, "", "  ")
+	os.WriteFile(p, out, 0644)
 }
 
 // ReindexAll rebuilds all index.html files, deepest-first.
