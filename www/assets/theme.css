@@ -673,11 +673,40 @@ table.doc-table tr:nth-child(even) td { background: var(--surface); }
   margin-bottom: 5px;
 }
 .comment-item-header .comment-ts { margin-bottom: 0; }
+.comment-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.comment-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text3);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  line-height: 1;
+}
+.comment-item:hover .comment-delete-btn { opacity: 1; }
+.comment-delete-btn:hover { color: var(--red); background: var(--red-dim); }
 .comment-item-acked {
   opacity: 0.55;
   border-left-color: var(--green) !important;
 }
 .comment-item-acked:hover { opacity: 0.8; }
+.comment-item-stale {
+  border-left-color: var(--yellow) !important;
+  opacity: 0.85;
+}
+.comment-item-stale .comment-quote {
+  border-left-color: var(--yellow);
+  background: var(--yellow-dim);
+  color: var(--text3);
+}
+.comment-item-stale .comment-quote::before { content: '⚠\00a0\201C'; }
 .comment-ack-badge {
   font-size: 11px;
   font-weight: 600;
@@ -824,8 +853,13 @@ mark.inline-comment-mark:hover {
 }
 .icp-quote::before { content: '\201C'; }
 .icp-quote::after  { content: '\201D'; }
-.icp-close {
+.icp-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex-shrink: 0;
+}
+.icp-close, .icp-delete {
   background: none;
   border: none;
   color: var(--text3);
@@ -836,6 +870,7 @@ mark.inline-comment-mark:hover {
   line-height: 1;
 }
 .icp-close:hover { color: var(--text); background: var(--surface2, var(--surface)); }
+.icp-delete:hover { color: var(--red); background: var(--red-dim); }
 .inline-comment-panel .thread-reply-form {
   display: block; /* always visible in the panel */
   border-top: 1px solid var(--border-subtle);

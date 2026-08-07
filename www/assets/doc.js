@@ -103,6 +103,16 @@ async function postThreadReply(parentTs, text) {
   if (!r.ok) throw new Error("server error " + r.status);
 }
 
+async function deleteComment(ts) {
+  if (!COMMENTS_ENABLED) return;
+  const r = await fetch(`${API}/delete-comment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder: FOLDER, file: FILE, ts }),
+  });
+  if (!r.ok) throw new Error("server error " + r.status);
+}
+
 // ── inline highlight marks ─────────────────────────────────────────────────
 // Map from comment ts → mark element in the doc body.
 const marksByTs = {};
@@ -308,8 +318,11 @@ function openInlinePanel(ts) {
 
   panel.innerHTML =
     `<div class="icp-header">` +
-      `<div class="icp-quote">${escHtml(comment.quote)}</div>` +
-      `<button class="icp-close" id="icp-close-btn">✕</button>` +
+      `<div class="icp-quote">${escHtml(comment.quote || "")}</div>` +
+      `<div class="icp-header-actions">` +
+        `<button class="icp-delete" id="icp-delete-btn" title="Delete comment">🗑</button>` +
+        `<button class="icp-close" id="icp-close-btn">✕</button>` +
+      `</div>` +
     `</div>` +
     `<div class="comment-item-header">` +
       `<div class="comment-ts">${authorHtml}${fmtTs(comment.ts)}</div>` +
@@ -340,6 +353,17 @@ function openInlinePanel(ts) {
   }
 
   document.getElementById("icp-close-btn").addEventListener("click", closeInlinePanel);
+
+  document.getElementById("icp-delete-btn").addEventListener("click", async () => {
+    if (!confirm("Delete this comment and its entire thread?")) return;
+    try {
+      await deleteComment(ts);
+      closeInlinePanel();
+      await loadComments();
+    } catch(e) {
+      alert("Delete failed: " + e.message);
+    }
+  });
 
   const replyInput  = document.getElementById("icp-reply-input");
   const replySubmit = document.getElementById("icp-reply-submit");
@@ -387,6 +411,64 @@ function closeInlinePanel() {
   document.removeEventListener("mousedown", icpOutsideClick);
 }
 
+// ── build comment item HTML (shared for doc-level and stale-inline) ──────────
+function buildCommentItemHtml(c, opts) {
+  const stale = opts && opts.stale; // inline comment whose range no longer resolves
+  const authorHtml = c.author && c.author !== "anonymous"
+    ? `<span class="comment-author">${escHtml(c.author)}</span>` : "";
+  const isHandled = c.handled || c.acknowledged;
+  const handledTs = c.reply_ts || c.ack_ts || "";
+  const badge = isHandled
+    ? `<span class="comment-ack-badge" title="Handled by Claude${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
+    : "";
+  const itemClass = (isHandled ? "comment-item comment-item-acked" : "comment-item") +
+                    (stale ? " comment-item-stale" : "");
+
+  const quoteHtml = (c.quote && (stale || !c.range))
+    ? `<div class="comment-quote">${escHtml(c.quote)}</div>`
+    : "";
+
+  const claudeReplyHtml = c.reply
+    ? `<div class="comment-reply">` +
+        `<span class="comment-reply-label">Claude:</span> ` +
+        `<span class="comment-reply-text">${escHtml(c.reply)}</span>` +
+      `</div>`
+    : "";
+
+  const repliesHtml = (c.replies || []).map(rep => {
+    const repAuthor = rep.author && rep.author !== "anonymous"
+      ? `<span class="comment-author">${escHtml(rep.author)}</span>` : "";
+    return `<div class="thread-reply">` +
+      `<div class="comment-ts">${repAuthor}${fmtTs(rep.ts)}</div>` +
+      `<div class="comment-text">${escHtml(rep.text)}</div>` +
+    `</div>`;
+  }).join("");
+
+  const ts = escHtml(c.ts);
+  return (
+    `<div class="${itemClass}" data-comment-ts="${ts}">` +
+      `<div class="comment-item-header">` +
+        `<div class="comment-ts">${authorHtml}${fmtTs(c.ts)}</div>` +
+        `<div class="comment-item-actions">` +
+          badge +
+          `<button class="comment-delete-btn" data-parent-ts="${ts}" title="Delete comment">✕</button>` +
+        `</div>` +
+      `</div>` +
+      quoteHtml +
+      `<div class="comment-text">${escHtml(c.text)}</div>` +
+      claudeReplyHtml +
+      (repliesHtml ? `<div class="thread-replies">${repliesHtml}</div>` : "") +
+      `<div class="thread-reply-form">` +
+        `<textarea class="thread-reply-input" data-parent-ts="${ts}" placeholder="Reply…" rows="2"></textarea>` +
+        `<div class="thread-reply-actions">` +
+          `<button class="thread-reply-submit" data-parent-ts="${ts}">Reply</button>` +
+          `<span class="comment-save-status thread-reply-status"></span>` +
+        `</div>` +
+      `</div>` +
+    `</div>`
+  );
+}
+
 // ── render comment list ────────────────────────────────────────────────────
 function renderComments(comments) {
   _allComments = comments || [];
@@ -402,66 +484,24 @@ function renderComments(comments) {
   const list = document.getElementById("comment-list");
   if (!list) return;
 
-  // doc-level = no range (includes old quote-only comments for backward compat)
-  const docLevel = _allComments.filter(c => !c.range);
+  // Bottom list = doc-level (no range) + stale inline (range stored but unresolvable after doc update)
+  const bottomList = _allComments.filter((c, i) => !c.range || !resolved[i]);
 
   if (!_allComments.length) {
     list.innerHTML = '<p class="comments-empty">No comments yet.</p>';
     return;
   }
-  if (!docLevel.length) {
+  if (!bottomList.length) {
     list.innerHTML = '';
     return;
   }
 
-  list.innerHTML = docLevel.map(c => {
-    const authorHtml = c.author && c.author !== "anonymous"
-      ? `<span class="comment-author">${escHtml(c.author)}</span>` : "";
-    const isHandled = c.handled || c.acknowledged;
-    const handledTs = c.reply_ts || c.ack_ts || "";
-    const badge = isHandled
-      ? `<span class="comment-ack-badge" title="Handled by Claude${handledTs ? ' on ' + fmtTs(handledTs) : ''}">✓ Handled</span>`
-      : "";
-    const itemClass = isHandled ? "comment-item comment-item-acked" : "comment-item";
-
-    const claudeReplyHtml = c.reply
-      ? `<div class="comment-reply">` +
-          `<span class="comment-reply-label">Claude:</span> ` +
-          `<span class="comment-reply-text">${escHtml(c.reply)}</span>` +
-        `</div>`
-      : "";
-
-    const repliesHtml = (c.replies || []).map(rep => {
-      const repAuthor = rep.author && rep.author !== "anonymous"
-        ? `<span class="comment-author">${escHtml(rep.author)}</span>` : "";
-      return `<div class="thread-reply">` +
-        `<div class="comment-ts">${repAuthor}${fmtTs(rep.ts)}</div>` +
-        `<div class="comment-text">${escHtml(rep.text)}</div>` +
-      `</div>`;
-    }).join("");
-
-    const ts = escHtml(c.ts);
-    return (
-      `<div class="${itemClass}">` +
-        `<div class="comment-item-header">` +
-          `<div class="comment-ts">${authorHtml}${fmtTs(c.ts)}</div>` +
-          badge +
-        `</div>` +
-        `<div class="comment-text">${escHtml(c.text)}</div>` +
-        claudeReplyHtml +
-        (repliesHtml ? `<div class="thread-replies">${repliesHtml}</div>` : "") +
-        `<div class="thread-reply-form">` +
-          `<textarea class="thread-reply-input" data-parent-ts="${ts}" placeholder="Reply…" rows="2"></textarea>` +
-          `<div class="thread-reply-actions">` +
-            `<button class="thread-reply-submit" data-parent-ts="${ts}">Reply</button>` +
-            `<span class="comment-save-status thread-reply-status"></span>` +
-          `</div>` +
-        `</div>` +
-      `</div>`
-    );
+  list.innerHTML = bottomList.map((c, i) => {
+    const stale = !!(c.range && !resolved[_allComments.indexOf(c)]);
+    return buildCommentItemHtml(c, { stale });
   }).join("");
 
-  // wire reply buttons in the doc-level list
+  // wire reply buttons
   list.querySelectorAll(".thread-reply-submit").forEach(btn => {
     btn.addEventListener("click", async () => {
       const parentTs = btn.dataset.parentTs;
@@ -479,6 +519,22 @@ function renderComments(comments) {
         await loadComments();
       } catch(e) {
         if (status) { status.textContent = "Error"; status.className = "comment-save-status thread-reply-status err"; }
+      }
+    });
+  });
+
+  // wire delete buttons
+  list.querySelectorAll(".comment-delete-btn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ts = btn.dataset.parentTs;
+      if (!ts) return;
+      if (!confirm("Delete this comment and its entire thread?")) return;
+      try {
+        await deleteComment(ts);
+        await loadComments();
+      } catch(e) {
+        alert("Delete failed: " + e.message);
       }
     });
   });

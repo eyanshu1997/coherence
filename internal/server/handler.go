@@ -119,6 +119,8 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleReplyComment(w, r)
 		case "/add-reply":
 			h.handleAddReply(w, r)
+		case "/delete-comment":
+			h.handleDeleteComment(w, r)
 		case "/create-folder":
 			h.handleCreateFolder(w, r)
 		case "/rename-folder":
@@ -455,6 +457,54 @@ func (h *Handler) handleAddReply(w http.ResponseWriter, r *http.Request) {
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
 	sendJSON(w, 200, map[string]any{"ok": true, "reply_ts": replyTs})
+}
+
+// handleDeleteComment removes a comment (and its entire thread) by ts.
+func (h *Handler) handleDeleteComment(w http.ResponseWriter, r *http.Request) {
+	if !h.sessionOK(r) && !strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") {
+		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
+		return
+	}
+	folder := str(body["folder"])
+	file := str(body["file"])
+	ts := str(body["ts"])
+	if folder == "" || file == "" || ts == "" {
+		sendJSON(w, 400, map[string]any{"error": "folder, file, ts required"})
+		return
+	}
+	p := safeCommentPath(h.cfg.DataDir, folder, file)
+	if p == "" {
+		sendJSON(w, 404, map[string]any{"error": "comment file not found"})
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		sendJSON(w, 404, map[string]any{"error": "comment file not found"})
+		return
+	}
+	var comments []map[string]any
+	json.Unmarshal(data, &comments)
+	filtered := comments[:0]
+	deleted := 0
+	for _, c := range comments {
+		if c["ts"] == ts {
+			deleted++
+		} else {
+			filtered = append(filtered, c)
+		}
+	}
+	if deleted == 0 {
+		sendJSON(w, 404, map[string]any{"error": "comment not found"})
+		return
+	}
+	out, _ := json.MarshalIndent(filtered, "", "  ")
+	os.WriteFile(p, out, 0644)
+	sendJSON(w, 200, map[string]any{"ok": true, "deleted": deleted})
 }
 
 // ── folder management ──────────────────────────────────────────────────────
