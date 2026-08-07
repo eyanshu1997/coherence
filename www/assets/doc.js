@@ -139,39 +139,82 @@ function pathToNode(root, path) {
   return cur;
 }
 
+function lastTextNodeBefore(root, container, offset) {
+  // Find the last text node that is strictly before container[offset] in document order.
+  // We do this by collecting all text nodes and finding the last one inside the range.
+  const all = [];
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = tw.nextNode())) all.push(n);
+  // The boundary position: create a collapsed range at container[offset]
+  const boundary = document.createRange();
+  boundary.setStart(container, offset);
+  boundary.collapse(true);
+  // Walk backward through text nodes to find the last one that ends at or before boundary
+  for (let i = all.length - 1; i >= 0; i--) {
+    const tn = all[i];
+    const cmp = boundary.compareBoundaryPoints(Range.START_TO_START,
+      (() => { const r = document.createRange(); r.setStart(tn, 0); return r; })());
+    if (cmp >= 0) return tn;
+  }
+  return null;
+}
+
 function serializeRange(sel) {
   const content = document.querySelector(".content");
   if (!content || !sel || sel.rangeCount === 0) return null;
-  let r = sel.getRangeAt(0).cloneRange();
+  const r = sel.getRangeAt(0);
   if (!content.contains(r.startContainer) || !content.contains(r.endContainer)) return null;
-  // Ensure both endpoints land on text nodes, not element boundaries.
-  // An eo=0 on an element node means "just before first child" — collapse back to prev text.
-  if (r.endContainer.nodeType !== Node.TEXT_NODE) {
-    r.setEnd(r.endContainer, r.endOffset);
-    // walk backward to the last text node before the boundary
-    const tw = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-    tw.currentNode = r.endContainer;
-    const prev = tw.previousNode();
-    if (!prev) return null;
-    r.setEnd(prev, prev.nodeValue.length);
+
+  let startNode = r.startContainer, startOffset = r.startOffset;
+  let endNode   = r.endContainer,   endOffset   = r.endOffset;
+
+  // If start is not a text node, find the first text node inside it at the offset
+  if (startNode.nodeType !== Node.TEXT_NODE) {
+    const child = startNode.childNodes[startOffset];
+    const tw = document.createTreeWalker(child || startNode, NodeFilter.SHOW_TEXT);
+    const first = tw.nextNode();
+    if (!first) return null;
+    startNode = first; startOffset = 0;
   }
-  if (r.startContainer.nodeType !== Node.TEXT_NODE) return null;
-  const sc = nodeToPath(content, r.startContainer);
-  const ec = nodeToPath(content, r.endContainer);
+
+  // If end is not a text node, walk back to the last text node before the boundary
+  if (endNode.nodeType !== Node.TEXT_NODE) {
+    const prev = lastTextNodeBefore(content, endNode, endOffset);
+    if (!prev) return null;
+    endNode = prev; endOffset = prev.nodeValue.length;
+  }
+
+  const sc = nodeToPath(content, startNode);
+  const ec = nodeToPath(content, endNode);
   if (!sc || !ec) return null;
-  return { sc, so: r.startOffset, ec, eo: r.endOffset };
+  return { sc, so: startOffset, ec, eo: endOffset };
 }
 
 function restoreRange(rangeData) {
   const content = document.querySelector(".content");
   if (!content || !rangeData) return null;
-  const startNode = pathToNode(content, rangeData.sc);
-  const endNode   = pathToNode(content, rangeData.ec);
+  let startNode = pathToNode(content, rangeData.sc);
+  let endNode   = pathToNode(content, rangeData.ec);
   if (!startNode || !endNode) return null;
+  let so = rangeData.so, eo = rangeData.eo;
+  // Snap non-text endpoints to nearest text nodes
+  if (startNode.nodeType !== Node.TEXT_NODE) {
+    const tw = document.createTreeWalker(startNode, NodeFilter.SHOW_TEXT);
+    startNode = tw.nextNode();
+    so = 0;
+    if (!startNode) return null;
+  }
+  if (endNode.nodeType !== Node.TEXT_NODE) {
+    const prev = lastTextNodeBefore(content, endNode, eo);
+    if (!prev) return null;
+    endNode = prev; eo = prev.nodeValue.length;
+  }
   try {
     const r = document.createRange();
-    r.setStart(startNode, rangeData.so);
-    r.setEnd(endNode, rangeData.eo);
+    r.setStart(startNode, so);
+    r.setEnd(endNode, eo);
+    if (r.collapsed) return null;
     return r;
   } catch(e) { return null; }
 }
