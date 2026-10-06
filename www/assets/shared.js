@@ -710,6 +710,188 @@ function initEditMode() {
   });
 }
 
+// ── Version history (doc pages) — revisions, diff, restore ────────────────
+// Diffs and sources come from the server already reduced to markdown: the
+// snapshot stores rendered HTML, but a diff of markup is unreadable, so the
+// server extracts each revision's embedded source before diffing.
+function initHistoryMode() {
+  const histBtn = document.getElementById("history-doc-btn");
+  if (!histBtn) return;
+
+  const folder   = window.DOC_FOLDER;
+  const filename = window.DOC_FILE;
+  if (!folder || !filename) { histBtn.style.display = "none"; return; }
+
+  const qs = (extra) =>
+    `folder=${encodeURIComponent(folder)}&file=${encodeURIComponent(filename)}` + (extra || "");
+
+  let isOpen     = false;
+  let escHandler = null;
+  let revisions  = [];
+  let selected   = null;
+  let view       = "diff"; // "diff" | "source"
+
+  function exitHistory() {
+    document.body.classList.remove("doc-history-mode");
+    document.getElementById("doc-history-pane")?.remove();
+    document.getElementById("history-header-controls")?.remove();
+    if (escHandler) { document.removeEventListener("keydown", escHandler); escHandler = null; }
+    isOpen = false;
+  }
+
+  function renderDiff(text) {
+    if (!text || !text.trim()) {
+      return '<div class="hist-empty">No differences — this version is identical to the current document.</div>';
+    }
+    const rows = text.split("\n").map(line => {
+      let cls = "dl";
+      if (line.startsWith("+++") || line.startsWith("---")) cls = "dl dl-file";
+      else if (line.startsWith("@@"))                       cls = "dl dl-hunk";
+      else if (line.startsWith("diff ") || line.startsWith("index ") ||
+               line.startsWith("new file") || line.startsWith("deleted file")) cls = "dl dl-meta";
+      else if (line.startsWith("+"))                        cls = "dl dl-add";
+      else if (line.startsWith("-"))                        cls = "dl dl-del";
+      return `<div class="${cls}">${escHtmlContent(line) || "&nbsp;"}</div>`;
+    });
+    return `<div class="hist-diff">${rows.join("")}</div>`;
+  }
+
+  async function loadBody() {
+    const body = document.getElementById("hist-body");
+    if (!body || !selected) return;
+    body.innerHTML = '<div class="hist-empty">Loading…</div>';
+    try {
+      if (view === "diff") {
+        const r = await fetch(`${_API}/doc-diff?${qs(`&rev=${encodeURIComponent(selected.rev)}`)}`);
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "diff failed");
+        body.innerHTML = renderDiff(d.diff);
+      } else {
+        const r = await fetch(`${_API}/doc-version?${qs(`&rev=${encodeURIComponent(selected.rev)}`)}`);
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "load failed");
+        body.innerHTML = `<pre class="hist-source">${escHtmlContent(d.content)}</pre>`;
+      }
+    } catch (e) {
+      body.innerHTML = `<div class="hist-empty hist-err">${escHtmlContent(e.message)}</div>`;
+    }
+  }
+
+  function selectRev(rev) {
+    selected = revisions.find(r => r.rev === rev) || null;
+    document.querySelectorAll(".hist-row").forEach(el => {
+      el.classList.toggle("active", el.dataset.rev === rev);
+    });
+    const restoreBtn = document.getElementById("hist-restore");
+    if (restoreBtn) restoreBtn.disabled = !selected;
+    const label = document.getElementById("hist-selected-label");
+    if (label && selected) label.textContent = `${selected.short} · ${selected.date}`;
+    loadBody();
+  }
+
+  async function doRestore() {
+    if (!selected) return;
+    const restoreBtn = document.getElementById("hist-restore");
+    const status     = document.getElementById("hist-status");
+    if (!confirm(
+      `Restore the version from ${selected.date} (${selected.short})?\n\n` +
+      `The current version is snapshotted first and stays in history — this adds a new version rather than erasing anything.`
+    )) return;
+    restoreBtn.disabled = true;
+    status.textContent  = "Restoring…";
+    status.className    = "ed-header-status";
+    try {
+      const r = await fetch(`${_API}/restore-doc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder, file: filename, rev: selected.rev }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "restore failed");
+      status.textContent = "Restored — reloading…";
+      status.className   = "ed-header-status ok";
+      setTimeout(() => window.location.reload(), 800);
+    } catch (e) {
+      status.textContent = "Restore failed: " + e.message;
+      status.className   = "ed-header-status err";
+      restoreBtn.disabled = false;
+    }
+  }
+
+  histBtn.addEventListener("click", async () => {
+    if (isOpen) { exitHistory(); return; }
+    isOpen = true;
+    document.body.classList.add("doc-history-mode");
+
+    const page = document.querySelector(".page") || document.body;
+    const pane = document.createElement("div");
+    pane.id = "doc-history-pane";
+    pane.innerHTML = `
+      <div class="hist-sidebar">
+        <div class="hist-sidebar-head">Versions</div>
+        <div class="hist-list" id="hist-list"><div class="hist-empty">Loading…</div></div>
+      </div>
+      <div class="hist-main">
+        <div class="hist-toolbar">
+          <div class="hist-tabs">
+            <button class="hist-tab active" data-view="diff">Diff vs current</button>
+            <button class="hist-tab" data-view="source">Source at this version</button>
+          </div>
+          <span class="hist-selected-label" id="hist-selected-label"></span>
+        </div>
+        <div class="hist-body" id="hist-body">
+          <div class="hist-empty">Select a version on the left.</div>
+        </div>
+      </div>`;
+    page.appendChild(pane);
+
+    const header   = document.querySelector(".site-header");
+    const controls = document.createElement("div");
+    controls.id = "history-header-controls";
+    controls.innerHTML = `
+      <span id="hist-status" class="ed-header-status"></span>
+      <button id="hist-restore" class="ed-header-save" disabled>Restore this version</button>
+      <button id="hist-close" class="ed-header-cancel">Close</button>`;
+    if (header) header.appendChild(controls);
+
+    document.getElementById("hist-close").addEventListener("click", exitHistory);
+    document.getElementById("hist-restore").addEventListener("click", doRestore);
+    pane.querySelectorAll(".hist-tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        view = tab.dataset.view;
+        pane.querySelectorAll(".hist-tab").forEach(t => t.classList.toggle("active", t === tab));
+        loadBody();
+      });
+    });
+    escHandler = (e) => { if (e.key === "Escape") { e.stopPropagation(); exitHistory(); } };
+    document.addEventListener("keydown", escHandler);
+
+    const list = document.getElementById("hist-list");
+    try {
+      const r = await fetch(`${_API}/doc-history?${qs()}`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "could not load history");
+      revisions = d.revisions || [];
+      if (!revisions.length) {
+        list.innerHTML = '<div class="hist-empty">No versions recorded yet. The first snapshot is taken shortly after the next edit.</div>';
+        return;
+      }
+      list.innerHTML = revisions.map((rv, i) => `
+        <button class="hist-row" data-rev="${escHtmlAttr(rv.rev)}">
+          <span class="hist-row-date">${escHtmlContent(rv.date)}${i === 0 ? ' <span class="hist-latest">latest</span>' : ""}</span>
+          <span class="hist-row-subject">${escHtmlContent(rv.subject)}</span>
+          <span class="hist-row-meta">${escHtmlContent(rv.short)} · ${escHtmlContent(rv.author)}</span>
+        </button>`).join("");
+      list.querySelectorAll(".hist-row").forEach(row => {
+        row.addEventListener("click", () => selectRev(row.dataset.rev));
+      });
+      selectRev(revisions[0].rev);
+    } catch (e) {
+      list.innerHTML = `<div class="hist-empty hist-err">${escHtmlContent(e.message)}</div>`;
+    }
+  });
+}
+
 function escHtmlAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
@@ -1133,6 +1315,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initNewDocModal();
   initUploadModal();
   initEditMode();
+  initHistoryMode();
   initShare();
   initSharePropagation();
 

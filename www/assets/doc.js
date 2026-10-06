@@ -1058,7 +1058,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Guest mode: IS_OWNER is injected by the server. When false, hide all write
   // controls and show a read-only banner.
   if (window.IS_OWNER === false) {
-    ["edit-doc-btn", "share-btn", "sel-chip", "comment-submit-btn"].forEach(id => {
+    ["edit-doc-btn", "history-doc-btn", "share-btn", "sel-chip", "comment-submit-btn"].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = "none";
     });

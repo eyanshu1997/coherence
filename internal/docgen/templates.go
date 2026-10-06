@@ -1,7 +1,7 @@
 package docgen
 
 // AssetVer is injected at build time via -ldflags "-X coherence/internal/docgen.AssetVer=vNN"
-var AssetVer = "v44"
+var AssetVer = "v45"
 
 const logoSVG = `<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="4" y="2" width="11" height="14" rx="2" fill="#0969da" opacity="0.15"/><rect x="4" y="2" width="11" height="14" rx="2" stroke="#0969da" stroke-width="1.5"/><rect x="7" y="6" width="14" height="14" rx="2" fill="#ffffff" stroke="#0969da" stroke-width="1.5"/><path d="M13 10.5l-2.5 3.5h2l-1 3.5 3.5-4.5h-2.2l1.2-2.5z" fill="#0969da"/></svg>`
 
@@ -28,6 +28,7 @@ const docTemplate = `<!DOCTYPE html>
   </div>
   <span class="header-tag" id="header-tag"></span>
   <button class="edit-doc-btn" id="edit-doc-btn" title="Edit this document">&#x270E; Edit</button>
+  <button class="history-doc-btn" id="history-doc-btn" title="Version history">&#x1F551; History</button>
   <button class="print-doc-btn" id="print-doc-btn" title="Save as PDF">&#x1F4C4; Save as PDF</button>
   <button class="share-btn" id="share-btn" title="Get shareable link">&#x1F517; Share</button>
   <div id="share-popover" class="share-popover" style="display:none">

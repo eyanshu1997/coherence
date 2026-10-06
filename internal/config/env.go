@@ -4,24 +4,25 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	DataDir            string
-	DocHost            string
-	DocPort            string
-	DocScheme          string
-	DocBase            string
-	CoherencePort      string
-	CoherenceBind      string
-	JiraBaseURL        string
-	GitHubOrg          string
-	FooterText         string
-	CompactThreshold   string
-	CoherenceHome      string
-	AuthFile           string
-	SharesFile         string
+	DataDir             string
+	DocHost             string
+	DocPort             string
+	DocScheme           string
+	DocBase             string
+	CoherencePort       string
+	CoherenceBind       string
+	JiraBaseURL         string
+	GitHubOrg           string
+	FooterText          string
+	CompactThreshold    string
+	CoherenceHome       string
+	AuthFile            string
+	SharesFile          string
 	RemoteUserHeader    string
 	RemoteUserJWTHeader string
 	AllowedUsers        []string
@@ -30,6 +31,9 @@ type Config struct {
 	APIKey              string
 	RemoteURL           string
 	SkipTLSVerify       bool
+	VersioningEnabled   bool
+	VersionsDir         string
+	VersionDebounceSec  int
 }
 
 func Load() *Config {
@@ -71,6 +75,11 @@ func Load() *Config {
 		APIKey:              getenv("COHERENCE_API_KEY", ""),
 		RemoteURL:           strings.TrimRight(getenv("COHERENCE_REMOTE_URL", ""), "/"),
 		SkipTLSVerify:       getenv("COHERENCE_SKIP_TLS_VERIFY", "") == "true",
+		VersioningEnabled:   getenv("COHERENCE_VERSIONING", "true") != "false",
+		// Deliberately a sibling of the data dir, never inside it: anything under
+		// DataDir is reachable over HTTP, and history holds deleted documents.
+		VersionsDir:        getenv("COHERENCE_VERSIONS_DIR", filepath.Join(home, ".coherence", "versions.git")),
+		VersionDebounceSec: atoiOr(getenv("COHERENCE_VERSION_DEBOUNCE_SEC", "60"), 60),
 	}
 }
 
@@ -92,6 +101,14 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+func atoiOr(s string, fallback int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 1 {
+		return fallback
+	}
+	return n
 }
 
 func getenv(key, fallback string) string {

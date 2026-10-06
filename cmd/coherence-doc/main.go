@@ -5,6 +5,7 @@ import (
 	"coherence/internal/auth"
 	"coherence/internal/config"
 	"coherence/internal/docgen"
+	"coherence/internal/versioning"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
@@ -50,7 +51,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "generate":
-		cmdGenerate(dgCfg, os.Args[2:])
+		cmdGenerate(cfg, dgCfg, os.Args[2:])
 	case "reindex":
 		docgen.ReindexAll(dgCfg)
 	case "set-password":
@@ -63,7 +64,7 @@ func main() {
 	}
 }
 
-func cmdGenerate(cfg *docgen.Config, args []string) {
+func cmdGenerate(appCfg *config.Config, cfg *docgen.Config, args []string) {
 	fs := flag.NewFlagSet("generate", flag.ExitOnError)
 	folder := fs.String("folder", "", "Folder path (required)")
 	title := fs.String("title", "", "Document title (required)")
@@ -90,6 +91,7 @@ func cmdGenerate(cfg *docgen.Config, args []string) {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+	snapshot(appCfg, "cli generate "+*folder)
 	fmt.Println(url)
 }
 
@@ -208,8 +210,26 @@ func cmdLegacy(dgCfg *docgen.Config, cfg *config.Config) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	snapshot(cfg, "cli generate "+*folder)
 	out, _ := json.Marshal(map[string]string{"url": url})
 	fmt.Println(string(out))
+}
+
+// snapshot records a CLI-side doc write in the version history. The CLI is
+// short-lived, so the commit is synchronous rather than debounced; the store
+// retries on index.lock in case the server is snapshotting at the same moment.
+func snapshot(cfg *config.Config, reason string) {
+	if cfg == nil || !cfg.VersioningEnabled {
+		return
+	}
+	store, err := versioning.New(cfg.VersionsDir, cfg.DataDir, versioning.DefaultDebounce)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: version snapshot skipped: %v\n", err)
+		return
+	}
+	if err := store.CommitNow(reason); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: version snapshot failed: %v\n", err)
+	}
 }
 
 func usage() {

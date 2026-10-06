@@ -5,6 +5,7 @@ import (
 	"coherence/internal/auth"
 	"coherence/internal/config"
 	"coherence/internal/docgen"
+	"coherence/internal/versioning"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -44,6 +45,7 @@ type Handler struct {
 	cfg   *config.Config
 	dgCfg *docgen.Config
 	mux   *http.ServeMux
+	ver   *versioning.Store
 }
 
 func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
@@ -51,6 +53,10 @@ func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
 	h.mux.HandleFunc("/", h.dispatch)
 	return h
 }
+
+// SetVersionStore attaches a snapshot store. A nil store leaves versioning off;
+// every call on *versioning.Store is nil-safe, so handlers need no guards.
+func (h *Handler) SetVersionStore(v *versioning.Store) { h.ver = v }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
@@ -91,6 +97,12 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleLogout(w, r)
 		case "/auth/share/check":
 			h.handleShareCheck(w, r)
+		case "/doc-history":
+			h.handleDocHistory(w, r)
+		case "/doc-version":
+			h.handleDocVersion(w, r)
+		case "/doc-diff":
+			h.handleDocDiff(w, r)
 		default:
 			if strings.HasPrefix(p, "/assets/") {
 				h.serveAsset(w, r, p[len("/assets/"):])
@@ -136,6 +148,8 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 			h.handleCreateDoc(w, r)
 		case "/update-doc":
 			h.handleUpdateDoc(w, r)
+		case "/restore-doc":
+			h.handleRestoreDoc(w, r)
 		case "/reindex":
 			h.handleReindex(w, r)
 		case "/upload-file":
@@ -379,6 +393,7 @@ func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
 	comments = append(comments, entry)
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
+	h.ver.Nudge("comment on " + folder + "/" + file)
 	sendJSON(w, 200, map[string]any{"ok": true, "entry": entry})
 }
 
@@ -425,6 +440,7 @@ func (h *Handler) handleAcknowledgeComment(w http.ResponseWriter, r *http.Reques
 	}
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
+	h.ver.Nudge("acknowledge comment on " + folder + "/" + file)
 	sendJSON(w, 200, map[string]any{"ok": true, "ack_ts": ackTs})
 }
 
@@ -475,6 +491,7 @@ func (h *Handler) handleReplyComment(w http.ResponseWriter, r *http.Request) {
 	}
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
+	h.ver.Nudge("reply on " + folder + "/" + file)
 	sendJSON(w, 200, map[string]any{"ok": true, "reply_ts": replyTs})
 }
 
@@ -535,6 +552,7 @@ func (h *Handler) handleAddReply(w http.ResponseWriter, r *http.Request) {
 	}
 	out, _ := json.MarshalIndent(comments, "", "  ")
 	os.WriteFile(p, out, 0644)
+	h.ver.Nudge("reply on " + folder + "/" + file)
 	sendJSON(w, 200, map[string]any{"ok": true, "reply_ts": replyTs})
 }
 
@@ -585,6 +603,7 @@ func (h *Handler) handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 	out, _ := json.MarshalIndent(filtered, "", "  ")
 	os.WriteFile(p, out, 0644)
+	h.ver.Nudge("delete comment on " + folder + "/" + file)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": deleted})
 }
 
@@ -650,6 +669,7 @@ func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		p = filepath.Dir(p)
 	}
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("create folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "folder": folder, "path": "/" + folder + "/"})
 }
 
@@ -681,6 +701,7 @@ func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("delete folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder})
 }
 
@@ -727,6 +748,7 @@ func (h *Handler) handleRenameFolder(w http.ResponseWriter, r *http.Request) {
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("rename folder " + oldRel + " to " + newRel)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
 
@@ -791,6 +813,7 @@ func (h *Handler) handleMoveFolder(w http.ResponseWriter, r *http.Request) {
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("move folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
 
@@ -826,6 +849,7 @@ func (h *Handler) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
 	os.Remove(docPath)
 	os.Remove(commentsPath)
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("delete " + folder + "/" + fileClean)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder + "/" + fileClean + ".html"})
 }
 
@@ -876,6 +900,7 @@ func (h *Handler) handleRenameDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	patchDocVars(newPath, "", newStem)
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("rename " + folder + "/" + oldStem + " to " + newStem)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": "/" + folder + "/" + newNameClean})
 }
 
@@ -934,6 +959,7 @@ func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
 	patchDocVars(dstPath, destFolder, stem)
 	go docgen.ReindexAll(h.dgCfg)
 	newRel := "/" + destFolder + "/" + filepath.Base(srcPath)
+	h.ver.Nudge("move " + folder + "/" + filepath.Base(srcPath) + " to " + destFolder)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": newRel})
 }
 
@@ -984,6 +1010,7 @@ func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
 	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
 	destAbs, _ := filepath.Abs(dest)
 	rel, _ := filepath.Rel(dataDirAbs, destAbs)
+	h.ver.Nudge("create " + folder + "/" + filepath.Base(dest))
 	sendJSON(w, 200, map[string]any{"ok": true, "url": docURL, "path": "/" + rel})
 }
 
@@ -1028,6 +1055,7 @@ func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
 	}
+	h.ver.Nudge("update " + folder + "/" + filepath.Base(dest))
 	sendJSON(w, 200, map[string]any{"ok": true, "url": docURL})
 }
 
@@ -1282,6 +1310,7 @@ func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
 	rel, _ := filepath.Rel(dataDirAbs, destFile)
 	go docgen.ReindexAll(h.dgCfg)
+	h.ver.Nudge("upload " + filepath.ToSlash(rel))
 	sendJSON(w, 200, map[string]any{"ok": true, "path": rel, "size": len(data)})
 }
 
@@ -1353,6 +1382,7 @@ func (h *Handler) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
 	rel, _ := filepath.Rel(dataDirAbs, destFile)
 	urlPath := "/" + filepath.ToSlash(rel)
+	h.ver.Nudge("upload image " + filepath.ToSlash(rel))
 	sendJSON(w, 200, map[string]any{
 		"ok":       true,
 		"path":     urlPath,
