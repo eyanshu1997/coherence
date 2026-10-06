@@ -263,13 +263,13 @@ func parseListBlock(lines []string, inline func(string) string) string {
 }
 
 var (
-	imgRe    = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
-	codeRe   = regexp.MustCompile("`([^`\n]+)`")
-	boldRe   = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	italicRe = regexp.MustCompile(`\*(.+?)\*`)
-	linkRe   = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	imgRe     = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+	codeRe    = regexp.MustCompile("`([^`\n]+)`")
+	boldRe    = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	italicRe  = regexp.MustCompile(`\*(.+?)\*`)
+	linkRe    = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	bareURLRe = regexp.MustCompile(`(https?://[^\s<>"']+)`)
-	anchorRe = regexp.MustCompile(`(?s)<a\b[^>]*>.*?</a>`)
+	anchorRe  = regexp.MustCompile(`(?s)<a\b[^>]*>.*?</a>`)
 )
 
 func applyInline(s, jiraBaseURL, githubOrg string) string {
@@ -334,7 +334,7 @@ func applyInline(s, jiraBaseURL, githubOrg string) string {
 		jiraIDRe := regexp.MustCompile(`(?:[^"/=\w\-])([A-Z]+-\d+)(?:\D|$)`)
 		s = jiraIDRe.ReplaceAllStringFunc(s, func(m string) string {
 			groups := jiraIDRe.FindStringSubmatch(m)
-			prefix := m[:len(m)-len(groups[0])+1]  // keep leading char
+			prefix := m[:len(m)-len(groups[0])+1] // keep leading char
 			ticket := groups[1]
 			suffix := m[len(prefix)+len(ticket):]
 			return prefix + fmt.Sprintf(`<a href="%s/browse/%s">%s</a>`, jiraBaseURL, ticket, ticket) + suffix

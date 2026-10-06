@@ -224,6 +224,45 @@ coherence/
 | Jira auto-linking | `JIRA_BASE_URL` in `.env` | Skipped |
 | GitHub PR auto-linking | `GITHUB_ORG` in `.env` | Skipped |
 | Version history (diff + restore) | `git` on `PATH` | Disabled; docs still generate |
+| Identity from an ALB | `REMOTE_USER_JWT_SIGNER` | Tokens unverifiable → every caller anonymous |
+
+---
+
+## Authentication and authorization
+
+Three questions, answered separately:
+
+| | |
+|---|---|
+| `apiWriteAllowed` | is the caller authenticated at all? |
+| `apiReadAllowed` | may they read document content? (allowlisted, or any identified user when `GUEST_ACCESS=true`) |
+| `apiOwnerWrite` | may they mutate? (allowlisted, or the API key) |
+
+**An identity the server cannot verify is not an identity.** Mutations are
+authorized off the caller's identity, so a header that anyone can set is worth
+nothing:
+
+- An **ALB OIDC token** is signature-checked (ES256) against the key the token
+  names, fetched from the regional endpoint and cached. `REMOTE_USER_JWT_SIGNER`
+  must pin your load balancer's ARN — that endpoint serves keys for *every* ALB
+  in the region, so an unpinned verifier accepts a token signed by somebody
+  else's load balancer. `alg` must be `ES256`; `none` and the HMAC algorithms are
+  refused outright.
+- A **bare identity header** has no signature at all, so it counts only when you
+  set `REMOTE_USER_HEADER_TRUSTED=true` to assert your proxy overwrites any
+  client-supplied copy. Adding the header without clearing an inbound one is not
+  enough.
+
+If verification is misconfigured nobody is locked out of reading — callers simply
+become anonymous, and the reason is logged (`auth: rejected OIDC token: …`).
+
+Loopback is trusted only when the request carries no proxy headers *and* no API
+key is configured, which distinguishes a local CLI call from a request the proxy
+forwarded to `127.0.0.1`.
+
+Bind to `127.0.0.1` (`COHERENCE_BIND`) whenever a proxy fronts the server.
+Leaving it on `0.0.0.0` lets anything routable to the port skip the proxy, and
+with it the whole auth layer.
 
 ---
 
@@ -241,18 +280,30 @@ them. The server refuses to enable versioning if the two paths overlap.
 What is snapshotted is the generated HTML — which is also the source, since every
 doc embeds its own markdown in a `doc-raw-markdown` script tag. Diffs and restores
 operate on that extracted markdown, because a diff of rendered markup is
-unreadable. `index.html` files, `*.log` and `*.jsonl` are excluded: indexes are
-regenerated on every write, and logs are large and reproducible from their source.
+unreadable. `index.html` is excluded because it is regenerated on every write, so tracking
+it would turn each edit into a tree-wide diff.
 
-Renames and moves are followed, but the attribution is validated rather than
-trusted. Rename detection is a content-similarity guess, and every generated doc
-shares the whole HTML template, so two unrelated short docs are ~98% alike —
-git will report a brand-new doc as a rename of whichever doc it resembles. The
-discriminator is existence, not similarity: a real rename means the old path is
-gone from the current tree, so a path change is accepted only when that path no
-longer exists in `HEAD`. If a doc is renamed `A`→`B` and a new doc later takes
-`A`, `B`'s history stops at the rename rather than reaching into the new
-occupant.
+**History is decided by document identity, not by path.** Each generated doc
+embeds a stable id (`window.DOC_UID`) minted once and preserved through every
+later write, and a revision counts as that document's history only when its blob
+carries the same id.
+
+Path is not identity: slugs get reused, docs get renamed and moved, and git's
+rename detection cannot help — it decides renames by content similarity, and
+every generated doc carries the whole HTML template, so two unrelated short docs
+are ~98% alike. Left to itself, git reports a brand-new document as a rename of
+whichever existing doc it resembles, which would offer another document's
+content as a revision for restore to write over the real one.
+
+A doc generated before ids existed has none, so nothing can be verified for it
+and only same-path revisions are kept — no rename following, but never another
+document's content. It gains an id the next time it is written.
+
+Files above `COHERENCE_VERSION_MAX_BLOB_MB` (8 MB) are left out, recomputed on
+every commit. Size rather than extension is the axis that matters: uploads land
+under `<folder>/logs/` keeping the uploader's extension and `.log` is a viewable
+document type, so excluding `*.log` meant uploading a log reported success and
+versioned nothing.
 
 **Restore is not a revert.** The old markdown is re-rendered through the normal
 generator and lands as a new snapshot on top, after the state being replaced is

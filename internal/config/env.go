@@ -9,32 +9,35 @@ import (
 )
 
 type Config struct {
-	DataDir             string
-	DocHost             string
-	DocPort             string
-	DocScheme           string
-	DocBase             string
-	CoherencePort       string
-	CoherenceBind       string
-	JiraBaseURL         string
-	GitHubOrg           string
-	FooterText          string
-	CompactThreshold    string
-	CoherenceHome       string
-	AuthFile            string
-	SharesFile          string
-	RemoteUserHeader    string
-	RemoteUserJWTHeader string
-	AllowedUsers        []string
-	AllowedDomain       string
-	GuestAccess         bool
-	APIKey              string
-	RemoteURL           string
-	SkipTLSVerify       bool
-	VersioningEnabled   bool
-	VersionsDir         string
-	VersionDebounceSec  int
-	VersionSweepSec     int
+	DataDir                 string
+	DocHost                 string
+	DocPort                 string
+	DocScheme               string
+	DocBase                 string
+	CoherencePort           string
+	CoherenceBind           string
+	JiraBaseURL             string
+	GitHubOrg               string
+	FooterText              string
+	CompactThreshold        string
+	CoherenceHome           string
+	AuthFile                string
+	SharesFile              string
+	RemoteUserHeader        string
+	RemoteUserJWTHeader     string
+	RemoteUserJWTSigner     string
+	RemoteUserHeaderTrusted bool
+	AllowedUsers            []string
+	AllowedDomain           string
+	GuestAccess             bool
+	APIKey                  string
+	RemoteURL               string
+	SkipTLSVerify           bool
+	VersioningEnabled       bool
+	VersionsDir             string
+	VersionDebounceSec      int
+	VersionSweepSec         int
+	VersionMaxBlobMB        int
 }
 
 func Load() *Config {
@@ -70,20 +73,28 @@ func Load() *Config {
 		SharesFile:          filepath.Join(home, ".ssh", "doc-shares.json"),
 		RemoteUserHeader:    getenv("REMOTE_USER_HEADER", "X-Remote-User"),
 		RemoteUserJWTHeader: getenv("REMOTE_USER_JWT_HEADER", ""),
-		AllowedUsers:        splitCSV(getenv("ALLOWED_USERS", "")),
-		AllowedDomain:       getenv("ALLOWED_DOMAIN", ""),
-		GuestAccess:         getenv("GUEST_ACCESS", "") == "true",
-		APIKey:              getenv("COHERENCE_API_KEY", ""),
-		RemoteURL:           strings.TrimRight(getenv("COHERENCE_REMOTE_URL", ""), "/"),
-		SkipTLSVerify:       getenv("COHERENCE_SKIP_TLS_VERIFY", "") == "true",
-		VersioningEnabled:   getenv("COHERENCE_VERSIONING", "true") != "false",
+		// The ALB whose signature is accepted. The regional key endpoint serves
+		// keys for every load balancer in the region, so without pinning, a
+		// token signed by anyone else's ALB would verify.
+		RemoteUserJWTSigner: getenv("REMOTE_USER_JWT_SIGNER", ""),
+		// REMOTE_USER_HEADER carries no signature, so it is only identity if the
+		// operator asserts the proxy strips a client-supplied copy. Off by default.
+		RemoteUserHeaderTrusted: getenv("REMOTE_USER_HEADER_TRUSTED", "") == "true",
+		AllowedUsers:            splitCSV(getenv("ALLOWED_USERS", "")),
+		AllowedDomain:           getenv("ALLOWED_DOMAIN", ""),
+		GuestAccess:             getenv("GUEST_ACCESS", "") == "true",
+		APIKey:                  getenv("COHERENCE_API_KEY", ""),
+		RemoteURL:               strings.TrimRight(getenv("COHERENCE_REMOTE_URL", ""), "/"),
+		SkipTLSVerify:           getenv("COHERENCE_SKIP_TLS_VERIFY", "") == "true",
+		VersioningEnabled:       getenv("COHERENCE_VERSIONING", "true") != "false",
 		// Deliberately a sibling of the data dir, never inside it: anything under
 		// DataDir is reachable over HTTP, and history holds deleted documents.
 		VersionsDir:        getenv("COHERENCE_VERSIONS_DIR", filepath.Join(home, ".coherence", "versions.git")),
 		VersionDebounceSec: atoiOr(getenv("COHERENCE_VERSION_DEBOUNCE_SEC", "60"), 60),
 		// Safety net for changes that reach the data dir without going through
 		// the CLI or an API handler, which therefore never nudge. 0 disables.
-		VersionSweepSec: atoiOrZero(getenv("COHERENCE_VERSION_SWEEP_SEC", "900"), 900),
+		VersionSweepSec:  atoiOrZero(getenv("COHERENCE_VERSION_SWEEP_SEC", "900"), 900),
+		VersionMaxBlobMB: atoiOrZero(getenv("COHERENCE_VERSION_MAX_BLOB_MB", "8"), 8),
 	}
 }
 

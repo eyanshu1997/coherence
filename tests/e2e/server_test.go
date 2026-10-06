@@ -216,8 +216,12 @@ func newTestServerWithIdentity(t *testing.T, allowedUsers []string, allowedDomai
 		AuthFile:         filepath.Join(t.TempDir(), "auth.json"),
 		SharesFile:       filepath.Join(t.TempDir(), "shares.json"),
 		RemoteUserHeader: "X-Remote-User",
-		AllowedUsers:     allowedUsers,
-		AllowedDomain:    allowedDomain,
+		// These tests model a proxy that overwrites any client-sent copy of the
+		// header. That trust is now opt-in, because without it the header is
+		// just a claim the caller makes about itself.
+		RemoteUserHeaderTrusted: true,
+		AllowedUsers:            allowedUsers,
+		AllowedDomain:           allowedDomain,
 	}
 	dgCfg := &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"}
 	h := server.New(cfg, dgCfg)
@@ -353,16 +357,17 @@ func newTestServerWithGuestAccess(t *testing.T, allowedUsers []string) (*httptes
 	os.MkdirAll(filepath.Join(coherenceHome, "www", "assets"), 0755)
 
 	cfg := &config.Config{
-		DataDir:          dataDir,
-		CoherenceHome:    coherenceHome,
-		DocBase:          "http://localhost",
-		CoherencePort:    "8080",
-		CoherenceBind:    "127.0.0.1",
-		AuthFile:         filepath.Join(t.TempDir(), "auth.json"),
-		SharesFile:       filepath.Join(t.TempDir(), "shares.json"),
-		RemoteUserHeader: "X-Remote-User",
-		AllowedUsers:     allowedUsers,
-		GuestAccess:      true,
+		DataDir:                 dataDir,
+		CoherenceHome:           coherenceHome,
+		DocBase:                 "http://localhost",
+		CoherencePort:           "8080",
+		CoherenceBind:           "127.0.0.1",
+		AuthFile:                filepath.Join(t.TempDir(), "auth.json"),
+		SharesFile:              filepath.Join(t.TempDir(), "shares.json"),
+		RemoteUserHeader:        "X-Remote-User",
+		RemoteUserHeaderTrusted: true,
+		AllowedUsers:            allowedUsers,
+		GuestAccess:             true,
 	}
 	dgCfg := &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"}
 	h := server.New(cfg, dgCfg)

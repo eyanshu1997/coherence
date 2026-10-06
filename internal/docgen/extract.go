@@ -12,6 +12,7 @@ import (
 // history and restore can work on markdown instead of on rendered markup.
 
 var (
+	docUIDRe      = regexp.MustCompile(`window\.DOC_UID\s*=\s*"([0-9a-ft][0-9a-f]*)"`)
 	rawMarkdownRe = regexp.MustCompile(`(?s)<script type="application/x-markdown" id="doc-raw-markdown">(.*?)</script>`)
 	docTitleRe    = regexp.MustCompile(`(?is)<title>(.*?)</title>`)
 )
@@ -27,6 +28,17 @@ func ExtractRawMarkdown(doc []byte) (string, bool) {
 	// GenerateDoc writes the source with "</" escaped to "<\/" so it cannot
 	// terminate the script tag early; undo exactly that substitution.
 	return strings.ReplaceAll(string(m[1]), "<\\/", "</"), true
+}
+
+// ExtractUID returns the stable document id embedded in a generated doc, or ""
+// for a doc generated before ids existed (or for foreign HTML). Callers must
+// treat "" as "identity unknown" rather than as a match.
+func ExtractUID(doc []byte) string {
+	m := docUIDRe.FindSubmatch(doc)
+	if m == nil {
+		return ""
+	}
+	return string(m[1])
 }
 
 // ExtractTitle returns the document title from a generated doc, with the

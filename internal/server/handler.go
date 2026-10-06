@@ -6,7 +6,7 @@ import (
 	"coherence/internal/config"
 	"coherence/internal/docgen"
 	"coherence/internal/versioning"
-	"encoding/base64"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,12 +47,47 @@ type Handler struct {
 	dgCfg *docgen.Config
 	mux   *http.ServeMux
 	ver   *versioning.Store
+
+	reindexMu      sync.Mutex
+	reindexPending bool
+
+	verifierOnce sync.Once
+	verifier     *auth.ALBVerifier
+	jwtLogMu     sync.Mutex
+	jwtLoggedAt  time.Time
 }
 
 func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
 	h := &Handler{cfg: cfg, dgCfg: dgCfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/", h.dispatch)
 	return h
+}
+
+// reindex rebuilds the folder indexes, coalescing concurrent requests.
+//
+// Each mutating handler used to spawn its own "go ReindexAll", and that is a
+// full walk of the tree which re-reads every document to extract its title and
+// rewrites every index.html. Overlapping walks raced on the same writes, and
+// nothing bounded how many could be in flight. One at a time, with a single
+// follow-up run if work arrived while one was going, gives the same result.
+func (h *Handler) reindex() {
+	h.reindexMu.Lock()
+	if h.reindexPending {
+		h.reindexMu.Unlock()
+		return // a run is already queued; it will pick up this change too
+	}
+	h.reindexPending = true
+	h.reindexMu.Unlock()
+
+	go func() {
+		for {
+			docgen.ReindexAll(h.dgCfg)
+			h.reindexMu.Lock()
+			h.reindexPending = false
+			h.reindexMu.Unlock()
+			return
+		}
+	}()
 }
 
 // SetVersionStore attaches a snapshot store. A nil store leaves versioning off;
@@ -190,12 +226,16 @@ func redirect(w http.ResponseWriter, r *http.Request, location string, extraHead
 	http.Redirect(w, r, location, http.StatusFound)
 }
 
+// maxJSONBody bounds a JSON request body. Document content arrives this way, so
+// it has to be generous, but unbounded means one request can exhaust memory.
+const maxJSONBody = 32 << 20
+
 func readBody(r *http.Request) (map[string]any, error) {
 	body := map[string]any{}
 	if r.ContentLength == 0 {
 		return body, nil
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBody)).Decode(&body); err != nil {
 		return nil, err
 	}
 	return body, nil
@@ -221,7 +261,11 @@ func (h *Handler) apiKeyOK(r *http.Request) bool {
 	if h.cfg.APIKey == "" {
 		return false
 	}
-	return r.Header.Get("Authorization") == "Bearer "+h.cfg.APIKey
+	presented := r.Header.Get("Authorization")
+	expected := "Bearer " + h.cfg.APIKey
+	// Constant time: a byte-at-a-time comparison leaks the key's prefix to a
+	// caller able to measure response timing.
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) == 1
 }
 
 // apiWriteAllowed reports whether the caller is authenticated at all. It is the
@@ -306,6 +350,36 @@ func (h *Handler) localCLI(r *http.Request) bool {
 	return true
 }
 
+// apiReadAllowed reports whether the caller may read document content through
+// the API. It mirrors what serveStatic enforces for the same bytes: an
+// allowlisted user, or any identified user when GUEST_ACCESS is on.
+//
+// /search, /list-folders and /comments return document content — titles,
+// snippets, the folder tree, comment text — and had no check at all, so they
+// bypassed the auth applied to the documents themselves. In a password-only
+// deployment that was a full-text read of every doc with no credential.
+func (h *Handler) apiReadAllowed(r *http.Request) bool {
+	if h.apiKeyOK(r) || h.localCLI(r) {
+		return true
+	}
+	if !h.apiWriteAllowed(r) {
+		return false
+	}
+	if h.userAllowed(h.currentUser(r)) {
+		return true
+	}
+	return h.cfg.GuestAccess
+}
+
+// requireReader writes a 401 and reports false when the caller may not read.
+func (h *Handler) requireReader(w http.ResponseWriter, r *http.Request) bool {
+	if h.apiReadAllowed(r) {
+		return true
+	}
+	sendJSON(w, 401, map[string]any{"error": "not authorized"})
+	return false
+}
+
 // requireOwner writes a 401 and reports false when the caller may not mutate.
 func (h *Handler) requireOwner(w http.ResponseWriter, r *http.Request) bool {
 	if h.apiOwnerWrite(r) {
@@ -328,9 +402,30 @@ func parseCookies(cookieHeader string) map[string]string {
 
 var sanitizeNameRe = regexp.MustCompile(`[^a-zA-Z0-9_\-.]`)
 
+// relFolderOf converts a validated absolute folder path back to the
+// slash-separated form GenerateDoc expects. Handlers validated the sanitized
+// path but then passed the caller's raw folder string to the generator, so the
+// path checked and the path written could differ: the "already exists" guard
+// tested one path and the write landed on another, and an unaddressable folder
+// could be created from characters the validator strips.
+func relFolderOf(dataDir, folderAbs string) string {
+	dataDirAbs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(dataDirAbs, folderAbs)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
 // ── comment endpoints ──────────────────────────────────────────────────────
 
 func (h *Handler) handleGetComments(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	folder := r.URL.Query().Get("folder")
 	file := r.URL.Query().Get("file")
 	p := safeCommentPath(h.cfg.DataDir, folder, file)
@@ -610,6 +705,9 @@ func (h *Handler) handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 // ── folder management ──────────────────────────────────────────────────────
 
 func (h *Handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	var folders []string
 	var recurse func(path, prefix string)
 	recurse = func(path, prefix string) {
@@ -668,7 +766,7 @@ func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		os.Chmod(p, 0755)
 		p = filepath.Dir(p)
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("create folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "folder": folder, "path": "/" + folder + "/"})
 }
@@ -700,7 +798,7 @@ func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("delete folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder})
 }
@@ -747,7 +845,7 @@ func (h *Handler) handleRenameFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("rename folder " + oldRel + " to " + newRel)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
@@ -812,7 +910,7 @@ func (h *Handler) handleMoveFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("move folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
@@ -848,7 +946,7 @@ func (h *Handler) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	os.Remove(docPath)
 	os.Remove(commentsPath)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("delete " + folder + "/" + fileClean)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder + "/" + fileClean + ".html"})
 }
@@ -899,7 +997,7 @@ func (h *Handler) handleRenameDoc(w http.ResponseWriter, r *http.Request) {
 		os.Rename(oldComments, newComments)
 	}
 	patchDocVars(newPath, "", newStem)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("rename " + folder + "/" + oldStem + " to " + newStem)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": "/" + folder + "/" + newNameClean})
 }
@@ -957,7 +1055,7 @@ func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
 		os.Rename(srcComments, filepath.Join(dstFp, stem+".comments.json"))
 	}
 	patchDocVars(dstPath, destFolder, stem)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	newRel := "/" + destFolder + "/" + filepath.Base(srcPath)
 	h.ver.Nudge("move " + folder + "/" + filepath.Base(srcPath) + " to " + destFolder)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": newRel})
@@ -967,7 +1065,7 @@ func (h *Handler) handleReindex(w http.ResponseWriter, r *http.Request) {
 	if !h.requireOwner(w, r) {
 		return
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	sendJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1002,7 +1100,7 @@ func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 409, map[string]any{"error": "file already exists", "filename": filepath.Base(dest)})
 		return
 	}
-	docURL, genErr := docgen.GenerateDoc(h.dgCfg, folder, title, content, filepath.Base(dest))
+	docURL, genErr := docgen.GenerateDoc(h.dgCfg, relFolderOf(h.cfg.DataDir, fp), title, content, filepath.Base(dest))
 	if genErr != nil {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
@@ -1050,7 +1148,7 @@ func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
 			title = strings.TrimSuffix(filepath.Base(dest), ".html")
 		}
 	}
-	docURL, genErr := docgen.GenerateDoc(h.dgCfg, folder, title, content, filepath.Base(dest))
+	docURL, genErr := docgen.GenerateDoc(h.dgCfg, relFolderOf(h.cfg.DataDir, fp), title, content, filepath.Base(dest))
 	if genErr != nil {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
@@ -1146,6 +1244,9 @@ var titleRe = regexp.MustCompile(`(?i)<title>([^<]*)</title>`)
 var contentRe = regexp.MustCompile(`(?is)<(?:div|main)[^>]+class="[^"]*content[^"]*"[^>]*>(.*?)</(?:div|main)>`)
 
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	q := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
 	if q == "" || len(q) < 2 {
 		sendJSON(w, 200, map[string]any{"results": []any{}, "query": q})
@@ -1309,7 +1410,7 @@ func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
 	rel, _ := filepath.Rel(dataDirAbs, destFile)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("upload " + filepath.ToSlash(rel))
 	sendJSON(w, 200, map[string]any{"ok": true, "path": rel, "size": len(data)})
 }
@@ -1565,41 +1666,74 @@ func (h *Handler) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 
 // ── user identity ──────────────────────────────────────────────────────────
 
+// currentUser returns the caller's identity, or "anonymous".
+//
+// Only a *verified* identity is ever returned, because this value authorizes
+// mutations and is recorded as the author of comments. An identity asserted by
+// a header nobody signed is not an identity: it previously meant that sending
+// "X-Remote-User: <any allowlisted address>" granted full owner authority, and
+// that a hand-made unsigned JWT did the same.
+//
+// Two header forms are recognised:
+//
+//	REMOTE_USER_JWT_HEADER    an AWS ALB OIDC token, signature-checked against
+//	                          the pinned load balancer (REMOTE_USER_JWT_SIGNER).
+//	                          Unpinned or unverifiable means anonymous.
+//	REMOTE_USER_HEADER        a bare identity, trusted only when the operator
+//	                          sets REMOTE_USER_HEADER_TRUSTED=true to assert
+//	                          that the proxy overwrites any client-sent copy.
 func (h *Handler) currentUser(r *http.Request) string {
 	if h.cfg.RemoteUserJWTHeader != "" {
-		if jwt := r.Header.Get(h.cfg.RemoteUserJWTHeader); jwt != "" {
-			if email := extractEmailFromJWT(jwt); email != "" {
+		if token := r.Header.Get(h.cfg.RemoteUserJWTHeader); token != "" {
+			email, err := h.jwtVerifier().Email(token)
+			if err == nil && email != "" {
 				return email
 			}
+			// Log once per rejection: a misconfigured signer otherwise looks
+			// exactly like "nobody is logged in".
+			h.logJWTRejection(err)
 		}
 	}
-	if h.cfg.RemoteUserHeader != "" {
-		if user := r.Header.Get(h.cfg.RemoteUserHeader); user != "" {
+	if h.cfg.RemoteUserHeaderTrusted && h.cfg.RemoteUserHeader != "" {
+		if user := strings.TrimSpace(r.Header.Get(h.cfg.RemoteUserHeader)); user != "" {
 			return user
 		}
 	}
 	return "anonymous"
 }
 
-// extractEmailFromJWT decodes a JWT payload and returns the "email" claim.
-// No signature verification — the auth proxy already verified the token.
-func extractEmailFromJWT(token string) string {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) < 2 {
-		return ""
+// jwtVerifier builds the ALB token verifier once, on first use. A nil result
+// verifies nothing, which is the correct behaviour when no signer is pinned.
+func (h *Handler) jwtVerifier() *auth.ALBVerifier {
+	h.verifierOnce.Do(func() {
+		if h.cfg.RemoteUserJWTSigner == "" {
+			log.Printf("auth: %s is set but REMOTE_USER_JWT_SIGNER is not — "+
+				"tokens cannot be verified, so no request will be treated as identified",
+				h.cfg.RemoteUserJWTHeader)
+			return
+		}
+		v, err := auth.NewALBVerifier(h.cfg.RemoteUserJWTSigner)
+		if err != nil {
+			log.Printf("auth: REMOTE_USER_JWT_SIGNER is unusable (%v) — tokens will not be verified", err)
+			return
+		}
+		h.verifier = v
+		log.Printf("auth: verifying OIDC tokens signed by %s", v.SignerARN())
+	})
+	return h.verifier
+}
+
+// logJWTRejection reports a verification failure at most once every 30s, so a
+// stream of bad tokens cannot flood the journal while a real misconfiguration
+// still shows up promptly.
+func (h *Handler) logJWTRejection(err error) {
+	h.jwtLogMu.Lock()
+	defer h.jwtLogMu.Unlock()
+	if time.Since(h.jwtLoggedAt) < 30*time.Second {
+		return
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return ""
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ""
-	}
-	if email, ok := claims["email"].(string); ok {
-		return email
-	}
-	return ""
+	h.jwtLoggedAt = time.Now()
+	log.Printf("auth: rejected OIDC token: %v", err)
 }
 
 // userAllowed checks the user against the configured allowlist.
@@ -1681,7 +1815,10 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	// non-allowed users are served the page in read-only mode instead of getting 403.
 	user := h.currentUser(r)
 	validShare := shareToken != "" && auth.CheckShare(h.cfg.SharesFile, shareToken, path)
-	isOwner := h.userAllowed(user) || validShare
+	// A share token grants read access to one path, never write: apiOwnerWrite
+	// does not consult shares. Reporting isOwner for a share recipient rendered
+	// the edit, history and share controls and then 401'd on every click.
+	isOwner := h.userAllowed(user) && !validShare
 	if !isOwner && !h.cfg.GuestAccess {
 		sendHTML(w, 403, "<h1>403 Forbidden</h1><p>Your account is not authorized.</p>")
 		return
@@ -1732,6 +1869,22 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	if mimeType == "" {
 		mimeType = "text/html"
 	}
+	// Documents are rendered from markdown that permits a whitelist of raw HTML
+	// tags with arbitrary attributes, so an event handler can reach the page.
+	// A CSP without 'unsafe-inline' for scripts would break the generator's own
+	// inline bootstrap, so this blocks the attribute vector specifically while
+	// still allowing the inline <script> blocks the template emits.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"object-src 'none'; "+
+			"base-uri 'none'; "+
+			"frame-ancestors 'self'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
 	if strings.Contains(mimeType, "html") {
 		userJSON, _ := json.Marshal(user)
 		ownerJSON, _ := json.Marshal(isOwner)

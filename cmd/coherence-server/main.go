@@ -30,6 +30,7 @@ func main() {
 			// Not fatal: serving docs matters more than keeping history.
 			fmt.Fprintf(os.Stderr, "WARNING: version history disabled: %v\n", err)
 		} else {
+			store.SetMaxBlobBytes(int64(cfg.VersionMaxBlobMB) << 20)
 			h.SetVersionStore(store)
 			fmt.Fprintf(os.Stdout, "Version history: %s (debounce %ds)\n", store.GitDir(), cfg.VersionDebounceSec)
 			// Capture anything that changed while the server was down.

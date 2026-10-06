@@ -125,24 +125,27 @@ func TestHistoryOnEmptyRepo(t *testing.T) {
 	}
 }
 
-func TestExcludedPathsAreNotSnapshotted(t *testing.T) {
+func TestDerivedFilesAreNotSnapshotted(t *testing.T) {
 	s, work := newStore(t)
-	// index.html is regenerated on every write, and logs are large and
-	// reproducible; neither belongs in history.
+	// index.html is regenerated on every write, so tracking it would turn each
+	// edit into a tree-wide diff. A log, by contrast, is a viewable document
+	// and is versioned like any other — it is excluded only if oversized
+	// (see TestOversizedFilesExcludedBySize).
 	writeDoc(t, work, "proj/index.html", "<html>index</html>")
-	writeDoc(t, work, "proj/logs/huge.log", "noise")
+	writeDoc(t, work, "proj/logs/modest.log", "a log small enough to keep")
 	writeDoc(t, work, "proj/doc.html", "v1")
 	if err := s.CommitNow("first"); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"proj/index.html", "proj/logs/huge.log"} {
-		revs, err := s.History(p, 10)
-		if err != nil {
-			t.Fatalf("History(%s): %v", p, err)
-		}
-		if len(revs) != 0 {
-			t.Errorf("%s should be excluded from snapshots, got %d revisions", p, len(revs))
-		}
+
+	if revs, err := s.History("proj/index.html", 10); err != nil || len(revs) != 0 {
+		t.Errorf("index.html should be excluded, got %d revisions (err %v)", len(revs), err)
+	}
+	if revs, err := s.History("proj/logs/modest.log", 10); err != nil || len(revs) != 1 {
+		t.Errorf("a modest log should be versioned, got %d revisions (err %v)", len(revs), err)
+	}
+	if revs, err := s.History("proj/doc.html", 10); err != nil || len(revs) != 1 {
+		t.Errorf("the doc should be versioned, got %d revisions (err %v)", len(revs), err)
 	}
 }
 
@@ -354,18 +357,35 @@ func TestRunPeriodicZeroIntervalIsNoop(t *testing.T) {
 	}
 }
 
+// idOf is a stand-in for docgen.ExtractUID: it reads an "id:<value>" marker.
+func idOf(blob []byte) string {
+	for _, line := range strings.Split(string(blob), "\n") {
+		if rest, ok := cutPrefix(line, "id:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+func cutPrefix(s, prefix string) (string, bool) {
+	if strings.HasPrefix(s, prefix) {
+		return s[len(prefix):], true
+	}
+	return "", false
+}
+
 // --follow attributes a new file to whichever existing file it resembles, and
-// for generated docs that resemblance is near-total. History must not offer
-// another document's revision, since restore would write it over the real one.
-func TestHistoryRejectsFalseRenameFromLiveDoc(t *testing.T) {
+// for generated docs that resemblance is near-total: they share the whole HTML
+// template. History must never offer another document's revision, since restore
+// would write it over the real one.
+func TestFilterByIdentityRejectsFalseRenameFromLiveDoc(t *testing.T) {
 	s, work := newStore(t)
-	// Two docs sharing a large boilerplate block, as generated docs do.
 	boiler := strings.Repeat("<!-- shared template line -->\n", 200)
-	writeDoc(t, work, "proj/original.html", boiler+"<p>the original body</p>\n")
+	writeDoc(t, work, "proj/original.html", boiler+"id:AAAA\n<p>the original body</p>\n")
 	if err := s.CommitNow("create original"); err != nil {
 		t.Fatal(err)
 	}
-	writeDoc(t, work, "proj/newcomer.html", boiler+"<p>a different body</p>\n")
+	writeDoc(t, work, "proj/newcomer.html", boiler+"id:BBBB\n<p>a different body</p>\n")
 	if err := s.CommitNow("create newcomer"); err != nil {
 		t.Fatal(err)
 	}
@@ -374,55 +394,198 @@ func TestHistoryRejectsFalseRenameFromLiveDoc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(revs) != 1 {
-		t.Fatalf("newcomer should have one revision of its own, got %d: %+v", len(revs), revs)
+	// git itself conflates them: that is the whole problem.
+	if len(revs) < 2 {
+		t.Skip("rename detection did not fire; nothing to filter")
 	}
-	for _, rv := range revs {
-		if rv.Path != "proj/newcomer.html" {
-			t.Errorf("history attributed to another document: %q", rv.Path)
-		}
+	kept := s.FilterByIdentity(revs, "BBBB", idOf)
+	if len(kept) != 1 {
+		t.Fatalf("expected only the newcomer's own revision, got %d: %+v", len(kept), kept)
+	}
+	blob, err := s.FileAt(kept[0].Rev, kept[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), "a different body") {
+		t.Errorf("kept another document's content: %q", blob)
+	}
+}
+
+// The half the previous heuristic missed: it accepted an attributed path that
+// had been DELETED, so a deleted document's content surfaced as another
+// document's history and restore would write it over the live one.
+func TestFilterByIdentityRejectsFalseRenameFromDeletedDoc(t *testing.T) {
+	s, work := newStore(t)
+	boiler := strings.Repeat("<!-- shared template line -->\n", 200)
+	writeDoc(t, work, "secret/secret.html", boiler+"id:SECRET\n<p>acquisition price is 4.2B</p>\n")
+	if err := s.CommitNow("create secret"); err != nil {
+		t.Fatal(err)
+	}
+	// Delete and create in one commit, which is exactly what the debounce produces.
+	if err := os.Remove(filepath.Join(work, "secret/secret.html")); err != nil {
+		t.Fatal(err)
+	}
+	writeDoc(t, work, "public/notes.html", boiler+"id:PUBLIC\n<p>nothing to see here</p>\n")
+	if err := s.CommitNow("delete secret, create notes"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs, err := s.History("public/notes.html", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := s.FilterByIdentity(revs, "PUBLIC", idOf)
+	for _, rv := range kept {
 		blob, err := s.FileAt(rv.Rev, rv.Path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(blob), "a different body") {
-			t.Errorf("revision holds another document's content: %q", blob)
+		if strings.Contains(string(blob), "acquisition price") {
+			t.Fatalf("a deleted document's content leaked into another doc's history via %s", rv.Path)
 		}
+	}
+	if len(kept) != 1 {
+		t.Errorf("expected notes' own single revision, got %d", len(kept))
 	}
 }
 
-// Fails safe: when a doc is renamed and a new doc later takes the old path,
-// history stops at the rename rather than reaching back through the new
-// occupant of that path.
-func TestHistoryTruncatesWhenOldPathIsReoccupied(t *testing.T) {
+// Identity follows a genuine rename, which is what path-based history cannot do.
+func TestFilterByIdentityFollowsGenuineRename(t *testing.T) {
 	s, work := newStore(t)
-	writeDoc(t, work, "proj/a.html", "content of the doc that gets renamed\n")
-	if err := s.CommitNow("create a"); err != nil {
+	writeDoc(t, work, "proj/alpha.html", "id:SAME\n<p>v1</p>\n")
+	if err := s.CommitNow("create alpha"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(filepath.Join(work, "proj/a.html"), filepath.Join(work, "proj/b.html")); err != nil {
+	if err := os.Rename(filepath.Join(work, "proj/alpha.html"), filepath.Join(work, "proj/beta.html")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitNow("rename a to b"); err != nil {
+	if err := s.CommitNow("rename to beta"); err != nil {
 		t.Fatal(err)
 	}
-	// Before the reoccupation, the rename is followed.
-	if revs, err := s.History("proj/b.html", 10); err != nil || len(revs) != 2 {
-		t.Fatalf("expected the rename to be followed (2 revisions), got %d (err %v)", len(revs), err)
-	}
-
-	writeDoc(t, work, "proj/a.html", "an unrelated new doc now living at the old path\n")
-	if err := s.CommitNow("new doc at a"); err != nil {
+	writeDoc(t, work, "proj/beta.html", "id:SAME\n<p>v2</p>\n")
+	if err := s.CommitNow("edit beta"); err != nil {
 		t.Fatal(err)
 	}
 
-	revs, err := s.History("proj/b.html", 10)
+	revs, err := s.History("proj/beta.html", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rv := range revs {
-		if rv.Path != "proj/b.html" {
-			t.Errorf("history reached into the reoccupied path %q", rv.Path)
+	kept := s.FilterByIdentity(revs, "SAME", idOf)
+	if len(kept) < 2 {
+		t.Fatalf("a genuine rename should still be followed, got %d revisions", len(kept))
+	}
+}
+
+// When a path is reused, every revision's path matches, so there is nothing for
+// a path-based rule to discriminate on at all — identity still separates them.
+func TestFilterByIdentityRejectsReoccupiedPath(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/slug.html", "id:FIRST\n<p>the first document</p>\n")
+	if err := s.CommitNow("create first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(work, "proj/slug.html")); err != nil {
+		t.Fatal(err)
+	}
+	writeDoc(t, work, "proj/slug.html", "id:SECOND\n<p>a new document at the same slug</p>\n")
+	if err := s.CommitNow("recreate at the same slug"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs, err := s.History("proj/slug.html", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := s.FilterByIdentity(revs, "SECOND", idOf)
+	for _, rv := range kept {
+		blob, err := s.FileAt(rv.Rev, rv.Path)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if strings.Contains(string(blob), "the first document") {
+			t.Fatal("the previous occupant of the path leaked into this document's history")
+		}
+	}
+	if len(kept) != 1 {
+		t.Errorf("expected one revision, got %d", len(kept))
+	}
+}
+
+// A document with no id predates the mechanism: nothing can be verified, so
+// only exact-path revisions are kept rather than guessing.
+func TestFilterByIdentityPreIdDocKeepsOnlySamePath(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/legacy.html", "<p>no id marker here</p>\n")
+	if err := s.CommitNow("create legacy"); err != nil {
+		t.Fatal(err)
+	}
+	revs, err := s.History("proj/legacy.html", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := s.FilterByIdentity(revs, "", idOf)
+	if len(kept) != 1 {
+		t.Fatalf("expected the one same-path revision, got %d", len(kept))
+	}
+	if kept[0].Path != "proj/legacy.html" {
+		t.Errorf("path %q", kept[0].Path)
+	}
+}
+
+// Size, not extension, decides what is too big to snapshot. An uploaded .log is
+// a first-class viewable document and must be recoverable; a 66MB one must not
+// enter history.
+func TestOversizedFilesExcludedBySize(t *testing.T) {
+	s, work := newStore(t)
+	s.SetMaxBlobBytes(1024)
+
+	writeDoc(t, work, "proj/small.log", strings.Repeat("a", 100))
+	writeDoc(t, work, "proj/huge.log", strings.Repeat("b", 4096))
+	writeDoc(t, work, "proj/doc.html", "content")
+	if err := s.CommitNow("uploads"); err != nil {
+		t.Fatal(err)
+	}
+
+	if revs, err := s.History("proj/small.log", 5); err != nil || len(revs) != 1 {
+		t.Errorf("a small log should be versioned, got %d revisions (err %v)", len(revs), err)
+	}
+	if revs, err := s.History("proj/huge.log", 5); err != nil || len(revs) != 0 {
+		t.Errorf("an oversized log should be excluded, got %d revisions (err %v)", len(revs), err)
+	}
+}
+
+// A filename containing glob metacharacters must be excluded literally rather
+// than as a pattern that could match other documents.
+func TestOversizedExcludeEscapesGlobs(t *testing.T) {
+	s, work := newStore(t)
+	s.SetMaxBlobBytes(1024)
+	writeDoc(t, work, "proj/a[1].log", strings.Repeat("b", 4096))
+	writeDoc(t, work, "proj/a1.html", "a normal doc that must survive")
+	if err := s.CommitNow("mixed"); err != nil {
+		t.Fatal(err)
+	}
+	if revs, err := s.History("proj/a1.html", 5); err != nil || len(revs) != 1 {
+		t.Errorf("the glob-escaped exclusion swallowed an unrelated doc: %d revisions (err %v)", len(revs), err)
+	}
+}
+
+// Delimiter bytes in a caller-supplied name must not be able to shift the
+// parsed fields and forge the author shown against a revision.
+func TestReasonDelimitersAreStripped(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/doc.html", "v1")
+	if err := s.CommitNow("create proj/A\x1fadmin@corp.example\x1fX"); err != nil {
+		t.Fatal(err)
+	}
+	revs, err := s.History("proj/doc.html", 5)
+	if err != nil || len(revs) != 1 {
+		t.Fatalf("got %d revisions (err %v)", len(revs), err)
+	}
+	if revs[0].Author != "coherence" {
+		t.Errorf("author was forged through the reason field: %q", revs[0].Author)
+	}
+	if strings.Contains(revs[0].Subject, "\x1f") {
+		t.Errorf("delimiter survived into the subject: %q", revs[0].Subject)
 	}
 }

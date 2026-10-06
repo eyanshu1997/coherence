@@ -730,8 +730,12 @@ function initHistoryMode() {
   let revisions  = [];
   let selected   = null;
   let view       = "diff"; // "diff" | "source"
+  let reqSeq     = 0;      // guards against out-of-order responses
 
   function exitHistory() {
+    view     = "diff";
+    selected = null;
+    reqSeq++;
     document.body.classList.remove("doc-history-mode");
     document.getElementById("doc-history-pane")?.remove();
     document.getElementById("history-header-controls")?.remove();
@@ -743,14 +747,29 @@ function initHistoryMode() {
     if (!text || !text.trim()) {
       return '<div class="hist-empty">No differences — this version is identical to the current document.</div>';
     }
+    // Only the header lines at the top of the diff are metadata. Testing
+    // startsWith("---") anywhere meant a deleted markdown rule ("---", which
+    // the renderer emits constantly) was styled grey like a file header
+    // instead of red like the deletion it is.
+    let inHeader = true;
     const rows = text.split("\n").map(line => {
       let cls = "dl";
-      if (line.startsWith("+++") || line.startsWith("---")) cls = "dl dl-file";
-      else if (line.startsWith("@@"))                       cls = "dl dl-hunk";
-      else if (line.startsWith("diff ") || line.startsWith("index ") ||
-               line.startsWith("new file") || line.startsWith("deleted file")) cls = "dl dl-meta";
-      else if (line.startsWith("+"))                        cls = "dl dl-add";
-      else if (line.startsWith("-"))                        cls = "dl dl-del";
+      if (inHeader && (line.startsWith("diff ") || line.startsWith("index ") ||
+                       line.startsWith("new file") || line.startsWith("deleted file") ||
+                       line.startsWith("similarity ") || line.startsWith("rename "))) {
+        cls = "dl dl-meta";
+      } else if (inHeader && (line.startsWith("--- ") || line.startsWith("+++ "))) {
+        // Note the trailing space: git's file headers are "--- path", whereas a
+        // deleted markdown rule is a bare "---".
+        cls = "dl dl-file";
+      } else if (line.startsWith("@@")) {
+        cls = "dl dl-hunk";
+        inHeader = false;
+      } else {
+        inHeader = false;
+        if (line.startsWith("+"))      cls = "dl dl-add";
+        else if (line.startsWith("-")) cls = "dl dl-del";
+      }
       return `<div class="${cls}">${escHtmlContent(line) || "&nbsp;"}</div>`;
     });
     return `<div class="hist-diff">${rows.join("")}</div>`;
@@ -759,20 +778,27 @@ function initHistoryMode() {
   async function loadBody() {
     const body = document.getElementById("hist-body");
     if (!body || !selected) return;
+    // Responses can arrive out of order, so a stale one must not overwrite the
+    // current selection's view.
+    const seq = ++reqSeq;
+    const stale = () => seq !== reqSeq;
     body.innerHTML = '<div class="hist-empty">Loading…</div>';
     try {
       if (view === "diff") {
         const r = await fetch(`${_API}/doc-diff?${qs(`&rev=${encodeURIComponent(selected.rev)}`)}`);
         const d = await r.json();
+        if (stale()) return;
         if (!r.ok) throw new Error(d.error || "diff failed");
         body.innerHTML = renderDiff(d.diff);
       } else {
         const r = await fetch(`${_API}/doc-version?${qs(`&rev=${encodeURIComponent(selected.rev)}`)}`);
         const d = await r.json();
+        if (stale()) return;
         if (!r.ok) throw new Error(d.error || "load failed");
         body.innerHTML = `<pre class="hist-source">${escHtmlContent(d.content)}</pre>`;
       }
     } catch (e) {
+      if (stale()) return;
       body.innerHTML = `<div class="hist-empty hist-err">${escHtmlContent(e.message)}</div>`;
     }
   }
@@ -892,11 +918,17 @@ function initHistoryMode() {
   });
 }
 
+// Escape everything that matters in both contexts rather than only what each
+// current call site happens to need — the asymmetry was a latent footgun.
 function escHtmlAttr(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function escHtmlContent(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ── Delete folder buttons ─────────────────────────────────────────────────
