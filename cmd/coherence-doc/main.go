@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -91,7 +92,7 @@ func cmdGenerate(appCfg *config.Config, cfg *docgen.Config, args []string) {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
-	snapshot(appCfg, "cli generate "+*folder)
+	snapshot(appCfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
 	fmt.Println(url)
 }
 
@@ -210,9 +211,18 @@ func cmdLegacy(dgCfg *docgen.Config, cfg *config.Config) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	snapshot(cfg, "cli generate "+*folder)
+	snapshot(cfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
 	out, _ := json.Marshal(map[string]string{"url": url})
 	fmt.Println(string(out))
+}
+
+// docLabel names the document a snapshot reason refers to, so history reads as
+// "cli generate folder/doc" rather than just naming the folder.
+func docLabel(filename, title string) string {
+	if filename != "" {
+		return strings.TrimSuffix(filename, ".html")
+	}
+	return title
 }
 
 // snapshot records a CLI-side doc write in the version history. The CLI is

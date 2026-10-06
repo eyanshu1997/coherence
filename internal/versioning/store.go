@@ -311,6 +311,32 @@ func (s *Store) CommitNow(reason string) error {
 	return s.commit(msg)
 }
 
+// RunPeriodic snapshots the tree on a fixed interval until stop is closed.
+//
+// Nudge only fires for writes that went through the CLI or an API handler. A
+// change made any other way — a file copied into the data dir, a comments
+// sidecar edited by hand, a tool dropping output in — would otherwise sit
+// uncommitted indefinitely. This makes the guarantee unconditional: whatever is
+// on disk is in history within one interval, however it got there.
+//
+// An idle tree costs nothing: commit() returns early when the index matches
+// HEAD, so a sweep over unchanged content produces no commit.
+func (s *Store) RunPeriodic(interval time.Duration, stop <-chan struct{}) {
+	if s == nil || interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			s.CommitNow("periodic sweep")
+		}
+	}
+}
+
 func (s *Store) commit(msg string) error {
 	s.commitSeq.Lock()
 	defer s.commitSeq.Unlock()

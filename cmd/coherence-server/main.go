@@ -38,6 +38,10 @@ func main() {
 					fmt.Fprintf(os.Stderr, "WARNING: startup snapshot failed: %v\n", err)
 				}
 			}()
+			if cfg.VersionSweepSec > 0 {
+				go store.RunPeriodic(time.Duration(cfg.VersionSweepSec)*time.Second, nil)
+				fmt.Fprintf(os.Stdout, "Version sweep: every %ds\n", cfg.VersionSweepSec)
+			}
 		}
 	}
 

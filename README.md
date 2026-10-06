@@ -252,6 +252,19 @@ Writes are debounced (60s by default) and committed by a single serialized
 worker, because the editor autosaves every 2s and several handlers reindex the
 tree from a goroutine.
 
+Every path that changes a doc produces a commit:
+
+| How the change arrives | When it is committed |
+|---|---|
+| `coherence-doc generate` (the `/generate-doc` skill) | immediately, synchronously — the CLI is short-lived |
+| `create-doc` / `update-doc` / the browser editor | on the 60s debounce |
+| rename, move, delete, upload, comment, reply | on the 60s debounce |
+| anything else — a file copied in, a sidecar hand-edited | on the periodic sweep (900s), and at server start |
+
+The sweep is the backstop: a nudge only fires for writes that went through the
+CLI or a handler, so without it a change made any other way would sit
+uncommitted indefinitely. An idle tree produces no commit, so the sweep is free.
+
 ```bash
 # inspect history directly
 git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data log --oneline
