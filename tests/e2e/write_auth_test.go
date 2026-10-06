@@ -1,12 +1,46 @@
 package e2e
 
 import (
+	"encoding/base64"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"coherence/internal/config"
+	"coherence/internal/docgen"
+	"coherence/internal/server"
 )
+
+// newTestServerWithUntrustedProxy models the real deployment shape: an auth
+// proxy in front, an allowlist, and no assertion that the bare identity header
+// is trustworthy — so a caller-supplied identity is worth nothing.
+func newTestServerWithUntrustedProxy(t *testing.T, allowedUsers []string) (*httptest.Server, string) {
+	t.Helper()
+	dataDir := tempDataDir(t)
+	coherenceHome := t.TempDir()
+	os.MkdirAll(filepath.Join(coherenceHome, "www", "assets"), 0755)
+	cfg := &config.Config{
+		DataDir:             dataDir,
+		CoherenceHome:       coherenceHome,
+		DocBase:             "http://localhost",
+		CoherencePort:       "8080",
+		CoherenceBind:       "127.0.0.1",
+		AuthFile:            filepath.Join(t.TempDir(), "auth.json"),
+		SharesFile:          filepath.Join(t.TempDir(), "shares.json"),
+		RemoteUserHeader:    "X-Remote-User",
+		RemoteUserJWTHeader: "X-Remote-User-JWT",
+		AllowedUsers:        allowedUsers,
+		GuestAccess:         true,
+	}
+	h := server.New(cfg, &docgen.Config{DataDir: dataDir, DocBase: "http://localhost"})
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+	return ts, dataDir
+}
 
 // Every mutating endpoint. Before version history was added, the ones marked
 // below carried no authentication check at all, so an unauthenticated caller
@@ -178,6 +212,76 @@ func TestDotPathsNotServed(t *testing.T) {
 		}
 		if strings.Contains(string(body[:n]), "secret") {
 			t.Errorf("GET %s leaked repository contents", p)
+		}
+	}
+}
+
+// The confirmed bypass: with the identity header untrusted by default, claiming
+// to be an allowlisted user must achieve nothing. Before this, sending
+// "X-Remote-User: owner@example.com" granted full owner authority on all 24
+// mutating endpoints and defeated COHERENCE_API_KEY entirely.
+func TestForgedIdentityHeaderGrantsNothing(t *testing.T) {
+	ts, dataDir := newTestServerWithUntrustedProxy(t, []string{"owner@example.com"})
+	os.MkdirAll(filepath.Join(dataDir, "victim"), 0755)
+
+	for _, ep := range mutatingEndpoints {
+		if code := postAs(t, ts.URL+ep.path, "owner@example.com", ep.body); code != 401 {
+			t.Errorf("POST %s with a forged identity: expected 401, got %d", ep.path, code)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "victim")); err != nil {
+		t.Errorf("a forged identity deleted the folder: %v", err)
+	}
+}
+
+// An unsigned JWT must be worth no more than the bare header.
+func TestForgedJWTGrantsNothing(t *testing.T) {
+	ts, _ := newTestServerWithUntrustedProxy(t, []string{"owner@example.com"})
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT"}`))
+	body := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"owner@example.com"}`))
+	token := hdr + "." + body + ".forged"
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/delete-folder",
+		strings.NewReader(`{"folder":"victim"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Remote-User-JWT", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("a forged OIDC token must be rejected, got %d", resp.StatusCode)
+	}
+}
+
+// /search, /list-folders and /comments return document content and had no
+// authorization check, bypassing the auth applied to the documents themselves.
+func TestReadEndpointsRequireAuthorization(t *testing.T) {
+	ts, dataDir := newTestServerWithUntrustedProxy(t, []string{"owner@example.com"})
+	os.MkdirAll(filepath.Join(dataDir, "secret"), 0755)
+	os.WriteFile(filepath.Join(dataDir, "secret", "doc.html"),
+		[]byte("<html><title>Secret</title><div class=\"content\">ftdv_password hunter2</div></html>"), 0644)
+
+	for _, path := range []string{
+		"/search?q=password",
+		"/list-folders",
+		"/comments?folder=secret&file=doc",
+	} {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Errorf("GET %s anonymously: expected 401, got %d", path, resp.StatusCode)
+		}
+		if strings.Contains(string(body), "hunter2") || strings.Contains(string(body), "secret") {
+			t.Errorf("GET %s leaked document content: %s", path, body)
 		}
 	}
 }

@@ -224,6 +224,45 @@ coherence/
 | Jira auto-linking | `JIRA_BASE_URL` in `.env` | Skipped |
 | GitHub PR auto-linking | `GITHUB_ORG` in `.env` | Skipped |
 | Version history (diff + restore) | `git` on `PATH` | Disabled; docs still generate |
+| Identity from an ALB | `REMOTE_USER_JWT_SIGNER` | Tokens unverifiable → every caller anonymous |
+
+---
+
+## Authentication and authorization
+
+Three questions, answered separately:
+
+| | |
+|---|---|
+| `apiWriteAllowed` | is the caller authenticated at all? |
+| `apiReadAllowed` | may they read document content? (allowlisted, or any identified user when `GUEST_ACCESS=true`) |
+| `apiOwnerWrite` | may they mutate? (allowlisted, or the API key) |
+
+**An identity the server cannot verify is not an identity.** Mutations are
+authorized off the caller's identity, so a header that anyone can set is worth
+nothing:
+
+- An **ALB OIDC token** is signature-checked (ES256) against the key the token
+  names, fetched from the regional endpoint and cached. `REMOTE_USER_JWT_SIGNER`
+  must pin your load balancer's ARN — that endpoint serves keys for *every* ALB
+  in the region, so an unpinned verifier accepts a token signed by somebody
+  else's load balancer. `alg` must be `ES256`; `none` and the HMAC algorithms are
+  refused outright.
+- A **bare identity header** has no signature at all, so it counts only when you
+  set `REMOTE_USER_HEADER_TRUSTED=true` to assert your proxy overwrites any
+  client-supplied copy. Adding the header without clearing an inbound one is not
+  enough.
+
+If verification is misconfigured nobody is locked out of reading — callers simply
+become anonymous, and the reason is logged (`auth: rejected OIDC token: …`).
+
+Loopback is trusted only when the request carries no proxy headers *and* no API
+key is configured, which distinguishes a local CLI call from a request the proxy
+forwarded to `127.0.0.1`.
+
+Bind to `127.0.0.1` (`COHERENCE_BIND`) whenever a proxy fronts the server.
+Leaving it on `0.0.0.0` lets anything routable to the port skip the proxy, and
+with it the whole auth layer.
 
 ---
 

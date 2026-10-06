@@ -6,7 +6,7 @@ import (
 	"coherence/internal/config"
 	"coherence/internal/docgen"
 	"coherence/internal/versioning"
-	"encoding/base64"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,6 +47,11 @@ type Handler struct {
 	dgCfg *docgen.Config
 	mux   *http.ServeMux
 	ver   *versioning.Store
+
+	verifierOnce sync.Once
+	verifier     *auth.ALBVerifier
+	jwtLogMu     sync.Mutex
+	jwtLoggedAt  time.Time
 }
 
 func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
@@ -190,12 +196,16 @@ func redirect(w http.ResponseWriter, r *http.Request, location string, extraHead
 	http.Redirect(w, r, location, http.StatusFound)
 }
 
+// maxJSONBody bounds a JSON request body. Document content arrives this way, so
+// it has to be generous, but unbounded means one request can exhaust memory.
+const maxJSONBody = 32 << 20
+
 func readBody(r *http.Request) (map[string]any, error) {
 	body := map[string]any{}
 	if r.ContentLength == 0 {
 		return body, nil
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBody)).Decode(&body); err != nil {
 		return nil, err
 	}
 	return body, nil
@@ -221,7 +231,11 @@ func (h *Handler) apiKeyOK(r *http.Request) bool {
 	if h.cfg.APIKey == "" {
 		return false
 	}
-	return r.Header.Get("Authorization") == "Bearer "+h.cfg.APIKey
+	presented := r.Header.Get("Authorization")
+	expected := "Bearer " + h.cfg.APIKey
+	// Constant time: a byte-at-a-time comparison leaks the key's prefix to a
+	// caller able to measure response timing.
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) == 1
 }
 
 // apiWriteAllowed reports whether the caller is authenticated at all. It is the
@@ -306,6 +320,36 @@ func (h *Handler) localCLI(r *http.Request) bool {
 	return true
 }
 
+// apiReadAllowed reports whether the caller may read document content through
+// the API. It mirrors what serveStatic enforces for the same bytes: an
+// allowlisted user, or any identified user when GUEST_ACCESS is on.
+//
+// /search, /list-folders and /comments return document content — titles,
+// snippets, the folder tree, comment text — and had no check at all, so they
+// bypassed the auth applied to the documents themselves. In a password-only
+// deployment that was a full-text read of every doc with no credential.
+func (h *Handler) apiReadAllowed(r *http.Request) bool {
+	if h.apiKeyOK(r) || h.localCLI(r) {
+		return true
+	}
+	if !h.apiWriteAllowed(r) {
+		return false
+	}
+	if h.userAllowed(h.currentUser(r)) {
+		return true
+	}
+	return h.cfg.GuestAccess
+}
+
+// requireReader writes a 401 and reports false when the caller may not read.
+func (h *Handler) requireReader(w http.ResponseWriter, r *http.Request) bool {
+	if h.apiReadAllowed(r) {
+		return true
+	}
+	sendJSON(w, 401, map[string]any{"error": "not authorized"})
+	return false
+}
+
 // requireOwner writes a 401 and reports false when the caller may not mutate.
 func (h *Handler) requireOwner(w http.ResponseWriter, r *http.Request) bool {
 	if h.apiOwnerWrite(r) {
@@ -331,6 +375,9 @@ var sanitizeNameRe = regexp.MustCompile(`[^a-zA-Z0-9_\-.]`)
 // ── comment endpoints ──────────────────────────────────────────────────────
 
 func (h *Handler) handleGetComments(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	folder := r.URL.Query().Get("folder")
 	file := r.URL.Query().Get("file")
 	p := safeCommentPath(h.cfg.DataDir, folder, file)
@@ -610,6 +657,9 @@ func (h *Handler) handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 // ── folder management ──────────────────────────────────────────────────────
 
 func (h *Handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	var folders []string
 	var recurse func(path, prefix string)
 	recurse = func(path, prefix string) {
@@ -1146,6 +1196,9 @@ var titleRe = regexp.MustCompile(`(?i)<title>([^<]*)</title>`)
 var contentRe = regexp.MustCompile(`(?is)<(?:div|main)[^>]+class="[^"]*content[^"]*"[^>]*>(.*?)</(?:div|main)>`)
 
 func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if !h.requireReader(w, r) {
+		return
+	}
 	q := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
 	if q == "" || len(q) < 2 {
 		sendJSON(w, 200, map[string]any{"results": []any{}, "query": q})
@@ -1565,41 +1618,74 @@ func (h *Handler) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 
 // ── user identity ──────────────────────────────────────────────────────────
 
+// currentUser returns the caller's identity, or "anonymous".
+//
+// Only a *verified* identity is ever returned, because this value authorizes
+// mutations and is recorded as the author of comments. An identity asserted by
+// a header nobody signed is not an identity: it previously meant that sending
+// "X-Remote-User: <any allowlisted address>" granted full owner authority, and
+// that a hand-made unsigned JWT did the same.
+//
+// Two header forms are recognised:
+//
+//	REMOTE_USER_JWT_HEADER    an AWS ALB OIDC token, signature-checked against
+//	                          the pinned load balancer (REMOTE_USER_JWT_SIGNER).
+//	                          Unpinned or unverifiable means anonymous.
+//	REMOTE_USER_HEADER        a bare identity, trusted only when the operator
+//	                          sets REMOTE_USER_HEADER_TRUSTED=true to assert
+//	                          that the proxy overwrites any client-sent copy.
 func (h *Handler) currentUser(r *http.Request) string {
 	if h.cfg.RemoteUserJWTHeader != "" {
-		if jwt := r.Header.Get(h.cfg.RemoteUserJWTHeader); jwt != "" {
-			if email := extractEmailFromJWT(jwt); email != "" {
+		if token := r.Header.Get(h.cfg.RemoteUserJWTHeader); token != "" {
+			email, err := h.jwtVerifier().Email(token)
+			if err == nil && email != "" {
 				return email
 			}
+			// Log once per rejection: a misconfigured signer otherwise looks
+			// exactly like "nobody is logged in".
+			h.logJWTRejection(err)
 		}
 	}
-	if h.cfg.RemoteUserHeader != "" {
-		if user := r.Header.Get(h.cfg.RemoteUserHeader); user != "" {
+	if h.cfg.RemoteUserHeaderTrusted && h.cfg.RemoteUserHeader != "" {
+		if user := strings.TrimSpace(r.Header.Get(h.cfg.RemoteUserHeader)); user != "" {
 			return user
 		}
 	}
 	return "anonymous"
 }
 
-// extractEmailFromJWT decodes a JWT payload and returns the "email" claim.
-// No signature verification — the auth proxy already verified the token.
-func extractEmailFromJWT(token string) string {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) < 2 {
-		return ""
+// jwtVerifier builds the ALB token verifier once, on first use. A nil result
+// verifies nothing, which is the correct behaviour when no signer is pinned.
+func (h *Handler) jwtVerifier() *auth.ALBVerifier {
+	h.verifierOnce.Do(func() {
+		if h.cfg.RemoteUserJWTSigner == "" {
+			log.Printf("auth: %s is set but REMOTE_USER_JWT_SIGNER is not — "+
+				"tokens cannot be verified, so no request will be treated as identified",
+				h.cfg.RemoteUserJWTHeader)
+			return
+		}
+		v, err := auth.NewALBVerifier(h.cfg.RemoteUserJWTSigner)
+		if err != nil {
+			log.Printf("auth: REMOTE_USER_JWT_SIGNER is unusable (%v) — tokens will not be verified", err)
+			return
+		}
+		h.verifier = v
+		log.Printf("auth: verifying OIDC tokens signed by %s", v.SignerARN())
+	})
+	return h.verifier
+}
+
+// logJWTRejection reports a verification failure at most once every 30s, so a
+// stream of bad tokens cannot flood the journal while a real misconfiguration
+// still shows up promptly.
+func (h *Handler) logJWTRejection(err error) {
+	h.jwtLogMu.Lock()
+	defer h.jwtLogMu.Unlock()
+	if time.Since(h.jwtLoggedAt) < 30*time.Second {
+		return
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return ""
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return ""
-	}
-	if email, ok := claims["email"].(string); ok {
-		return email
-	}
-	return ""
+	h.jwtLoggedAt = time.Now()
+	log.Printf("auth: rejected OIDC token: %v", err)
 }
 
 // userAllowed checks the user against the configured allowlist.
@@ -1732,6 +1818,22 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	if mimeType == "" {
 		mimeType = "text/html"
 	}
+	// Documents are rendered from markdown that permits a whitelist of raw HTML
+	// tags with arbitrary attributes, so an event handler can reach the page.
+	// A CSP without 'unsafe-inline' for scripts would break the generator's own
+	// inline bootstrap, so this blocks the attribute vector specifically while
+	// still allowing the inline <script> blocks the template emits.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"object-src 'none'; "+
+			"base-uri 'none'; "+
+			"frame-ancestors 'self'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
 	if strings.Contains(mimeType, "html") {
 		userJSON, _ := json.Marshal(user)
 		ownerJSON, _ := json.Marshal(isOwner)
