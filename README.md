@@ -228,6 +228,26 @@ coherence/
 
 ---
 
+## Keeping one deployment's details out of the repo
+
+This repository is public and is deployed into private environments. Anything
+specific to a deployment — a hostname, an account id, a cloud resource arn, a
+private address, a colleague's email, an internal ticket id or document path —
+belongs in `.env` (gitignored) or in the operator's own `~/.claude` config.
+Never in a tracked file, and above all never in a commit message, which cannot
+be corrected afterwards without rewriting published history.
+
+```bash
+scripts/check-no-local-details                 # tracked files
+scripts/check-no-local-details origin/main..HEAD   # messages + added lines
+```
+
+Use RFC 2606 reserved names for examples: `example.com`, anything ending
+`.example`, the account placeholder `123456789012`, ticket ids like
+`TICKET-123`.
+
+---
+
 ## Authentication and authorization
 
 Three questions, answered separately:
@@ -330,7 +350,7 @@ uncommitted indefinitely. An idle tree produces no commit, so the sweep is free.
 # inspect history directly
 git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data log --oneline
 git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data \
-    log --follow -- valtix-sw/VAL-12345/analysis.html
+    log --follow -- myproject/TICKET-123/analysis.html
 ```
 
 ### Calling the API from a script or agent

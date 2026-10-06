@@ -384,7 +384,7 @@ func TestGuestAccessAllowsNonAllowedUser(t *testing.T) {
 	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
-	req.Header.Set("X-Remote-User", "guest@other.com")
+	req.Header.Set("X-Remote-User", "guest@other.example")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +402,7 @@ func TestGuestAccessBlocked(t *testing.T) {
 	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
-	req.Header.Set("X-Remote-User", "guest@other.com")
+	req.Header.Set("X-Remote-User", "guest@other.example")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -441,7 +441,7 @@ func TestIsOwnerInjectedFalseForGuest(t *testing.T) {
 	os.WriteFile(filepath.Join(dataDir, "index.html"), []byte(`<html><head></head><body>home</body></html>`), 0644)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
-	req.Header.Set("X-Remote-User", "guest@other.com")
+	req.Header.Set("X-Remote-User", "guest@other.example")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
