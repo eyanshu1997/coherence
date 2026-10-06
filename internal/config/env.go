@@ -34,6 +34,7 @@ type Config struct {
 	VersioningEnabled   bool
 	VersionsDir         string
 	VersionDebounceSec  int
+	VersionSweepSec     int
 }
 
 func Load() *Config {
@@ -80,6 +81,9 @@ func Load() *Config {
 		// DataDir is reachable over HTTP, and history holds deleted documents.
 		VersionsDir:        getenv("COHERENCE_VERSIONS_DIR", filepath.Join(home, ".coherence", "versions.git")),
 		VersionDebounceSec: atoiOr(getenv("COHERENCE_VERSION_DEBOUNCE_SEC", "60"), 60),
+		// Safety net for changes that reach the data dir without going through
+		// the CLI or an API handler, which therefore never nudge. 0 disables.
+		VersionSweepSec: atoiOrZero(getenv("COHERENCE_VERSION_SWEEP_SEC", "900"), 900),
 	}
 }
 
@@ -109,6 +113,15 @@ func atoiOr(s string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// atoiOrZero is atoiOr but accepts 0, which callers use to mean "disabled".
+func atoiOrZero(s string, fallback int) int {
+	v := strings.TrimSpace(s)
+	if v == "0" {
+		return 0
+	}
+	return atoiOr(v, fallback)
 }
 
 func getenv(key, fallback string) string {

@@ -288,3 +288,68 @@ func TestHistoryExcludesDeletionCommits(t *testing.T) {
 		t.Errorf("unexpected recovered content: %q", got)
 	}
 }
+
+// A change that never nudges — a file written straight into the tree — must
+// still reach history via the periodic sweep.
+func TestRunPeriodicSnapshotsUnnudgedChanges(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/doc.html", "v1")
+	if err := s.CommitNow("seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go s.RunPeriodic(60*time.Millisecond, stop)
+
+	// Written directly, with no Nudge at all.
+	writeDoc(t, work, "proj/smuggled.html", "arrived without the API")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		revs, err := s.History("proj/smuggled.html", 5)
+		if err == nil && len(revs) > 0 {
+			return // swept up as intended
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("periodic sweep never committed a file written outside the API")
+}
+
+// The sweep must not manufacture empty commits on an idle tree.
+func TestRunPeriodicIdleMakesNoCommits(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/doc.html", "v1")
+	if err := s.CommitNow("seed"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.run("rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	go s.RunPeriodic(40*time.Millisecond, stop)
+	time.Sleep(400 * time.Millisecond)
+	close(stop)
+
+	after, err := s.run("rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(before)) != strings.TrimSpace(string(after)) {
+		t.Errorf("idle sweeps created commits: %s -> %s",
+			strings.TrimSpace(string(before)), strings.TrimSpace(string(after)))
+	}
+}
+
+func TestRunPeriodicZeroIntervalIsNoop(t *testing.T) {
+	s, _ := newStore(t)
+	done := make(chan struct{})
+	go func() { s.RunPeriodic(0, nil); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("RunPeriodic with a zero interval should return immediately")
+	}
+}
