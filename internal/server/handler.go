@@ -48,6 +48,9 @@ type Handler struct {
 	mux   *http.ServeMux
 	ver   *versioning.Store
 
+	reindexMu      sync.Mutex
+	reindexPending bool
+
 	verifierOnce sync.Once
 	verifier     *auth.ALBVerifier
 	jwtLogMu     sync.Mutex
@@ -58,6 +61,33 @@ func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
 	h := &Handler{cfg: cfg, dgCfg: dgCfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/", h.dispatch)
 	return h
+}
+
+// reindex rebuilds the folder indexes, coalescing concurrent requests.
+//
+// Each mutating handler used to spawn its own "go ReindexAll", and that is a
+// full walk of the tree which re-reads every document to extract its title and
+// rewrites every index.html. Overlapping walks raced on the same writes, and
+// nothing bounded how many could be in flight. One at a time, with a single
+// follow-up run if work arrived while one was going, gives the same result.
+func (h *Handler) reindex() {
+	h.reindexMu.Lock()
+	if h.reindexPending {
+		h.reindexMu.Unlock()
+		return // a run is already queued; it will pick up this change too
+	}
+	h.reindexPending = true
+	h.reindexMu.Unlock()
+
+	go func() {
+		for {
+			docgen.ReindexAll(h.dgCfg)
+			h.reindexMu.Lock()
+			h.reindexPending = false
+			h.reindexMu.Unlock()
+			return
+		}
+	}()
 }
 
 // SetVersionStore attaches a snapshot store. A nil store leaves versioning off;
@@ -371,6 +401,24 @@ func parseCookies(cookieHeader string) map[string]string {
 }
 
 var sanitizeNameRe = regexp.MustCompile(`[^a-zA-Z0-9_\-.]`)
+
+// relFolderOf converts a validated absolute folder path back to the
+// slash-separated form GenerateDoc expects. Handlers validated the sanitized
+// path but then passed the caller's raw folder string to the generator, so the
+// path checked and the path written could differ: the "already exists" guard
+// tested one path and the write landed on another, and an unaddressable folder
+// could be created from characters the validator strips.
+func relFolderOf(dataDir, folderAbs string) string {
+	dataDirAbs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(dataDirAbs, folderAbs)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
 
 // ── comment endpoints ──────────────────────────────────────────────────────
 
@@ -718,7 +766,7 @@ func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		os.Chmod(p, 0755)
 		p = filepath.Dir(p)
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("create folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "folder": folder, "path": "/" + folder + "/"})
 }
@@ -750,7 +798,7 @@ func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("delete folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder})
 }
@@ -797,7 +845,7 @@ func (h *Handler) handleRenameFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("rename folder " + oldRel + " to " + newRel)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
@@ -862,7 +910,7 @@ func (h *Handler) handleMoveFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	newRel, _ := filepath.Rel(dataDirAbs, newFp)
 	rewriteFolderLinks(newFp, oldRel, newRel)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("move folder " + folder)
 	sendJSON(w, 200, map[string]any{"ok": true, "new_folder": newRel, "path": "/" + newRel + "/"})
 }
@@ -898,7 +946,7 @@ func (h *Handler) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	os.Remove(docPath)
 	os.Remove(commentsPath)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("delete " + folder + "/" + fileClean)
 	sendJSON(w, 200, map[string]any{"ok": true, "deleted": folder + "/" + fileClean + ".html"})
 }
@@ -949,7 +997,7 @@ func (h *Handler) handleRenameDoc(w http.ResponseWriter, r *http.Request) {
 		os.Rename(oldComments, newComments)
 	}
 	patchDocVars(newPath, "", newStem)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("rename " + folder + "/" + oldStem + " to " + newStem)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": "/" + folder + "/" + newNameClean})
 }
@@ -1007,7 +1055,7 @@ func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
 		os.Rename(srcComments, filepath.Join(dstFp, stem+".comments.json"))
 	}
 	patchDocVars(dstPath, destFolder, stem)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	newRel := "/" + destFolder + "/" + filepath.Base(srcPath)
 	h.ver.Nudge("move " + folder + "/" + filepath.Base(srcPath) + " to " + destFolder)
 	sendJSON(w, 200, map[string]any{"ok": true, "path": newRel})
@@ -1017,7 +1065,7 @@ func (h *Handler) handleReindex(w http.ResponseWriter, r *http.Request) {
 	if !h.requireOwner(w, r) {
 		return
 	}
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	sendJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1052,7 +1100,7 @@ func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 409, map[string]any{"error": "file already exists", "filename": filepath.Base(dest)})
 		return
 	}
-	docURL, genErr := docgen.GenerateDoc(h.dgCfg, folder, title, content, filepath.Base(dest))
+	docURL, genErr := docgen.GenerateDoc(h.dgCfg, relFolderOf(h.cfg.DataDir, fp), title, content, filepath.Base(dest))
 	if genErr != nil {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
@@ -1100,7 +1148,7 @@ func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
 			title = strings.TrimSuffix(filepath.Base(dest), ".html")
 		}
 	}
-	docURL, genErr := docgen.GenerateDoc(h.dgCfg, folder, title, content, filepath.Base(dest))
+	docURL, genErr := docgen.GenerateDoc(h.dgCfg, relFolderOf(h.cfg.DataDir, fp), title, content, filepath.Base(dest))
 	if genErr != nil {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
@@ -1362,7 +1410,7 @@ func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	dataDirAbs, _ := filepath.Abs(h.cfg.DataDir)
 	rel, _ := filepath.Rel(dataDirAbs, destFile)
-	go docgen.ReindexAll(h.dgCfg)
+	h.reindex()
 	h.ver.Nudge("upload " + filepath.ToSlash(rel))
 	sendJSON(w, 200, map[string]any{"ok": true, "path": rel, "size": len(data)})
 }
@@ -1767,7 +1815,10 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	// non-allowed users are served the page in read-only mode instead of getting 403.
 	user := h.currentUser(r)
 	validShare := shareToken != "" && auth.CheckShare(h.cfg.SharesFile, shareToken, path)
-	isOwner := h.userAllowed(user) || validShare
+	// A share token grants read access to one path, never write: apiOwnerWrite
+	// does not consult shares. Reporting isOwner for a share recipient rendered
+	// the edit, history and share controls and then 401'd on every click.
+	isOwner := h.userAllowed(user) && !validShare
 	if !isOwner && !h.cfg.GuestAccess {
 		sendHTML(w, 403, "<h1>403 Forbidden</h1><p>Your account is not authorized.</p>")
 		return

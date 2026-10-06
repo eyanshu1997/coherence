@@ -280,18 +280,30 @@ them. The server refuses to enable versioning if the two paths overlap.
 What is snapshotted is the generated HTML — which is also the source, since every
 doc embeds its own markdown in a `doc-raw-markdown` script tag. Diffs and restores
 operate on that extracted markdown, because a diff of rendered markup is
-unreadable. `index.html` files, `*.log` and `*.jsonl` are excluded: indexes are
-regenerated on every write, and logs are large and reproducible from their source.
+unreadable. `index.html` is excluded because it is regenerated on every write, so tracking
+it would turn each edit into a tree-wide diff.
 
-Renames and moves are followed, but the attribution is validated rather than
-trusted. Rename detection is a content-similarity guess, and every generated doc
-shares the whole HTML template, so two unrelated short docs are ~98% alike —
-git will report a brand-new doc as a rename of whichever doc it resembles. The
-discriminator is existence, not similarity: a real rename means the old path is
-gone from the current tree, so a path change is accepted only when that path no
-longer exists in `HEAD`. If a doc is renamed `A`→`B` and a new doc later takes
-`A`, `B`'s history stops at the rename rather than reaching into the new
-occupant.
+**History is decided by document identity, not by path.** Each generated doc
+embeds a stable id (`window.DOC_UID`) minted once and preserved through every
+later write, and a revision counts as that document's history only when its blob
+carries the same id.
+
+Path is not identity: slugs get reused, docs get renamed and moved, and git's
+rename detection cannot help — it decides renames by content similarity, and
+every generated doc carries the whole HTML template, so two unrelated short docs
+are ~98% alike. Left to itself, git reports a brand-new document as a rename of
+whichever existing doc it resembles, which would offer another document's
+content as a revision for restore to write over the real one.
+
+A doc generated before ids existed has none, so nothing can be verified for it
+and only same-path revisions are kept — no rename following, but never another
+document's content. It gains an id the next time it is written.
+
+Files above `COHERENCE_VERSION_MAX_BLOB_MB` (8 MB) are left out, recomputed on
+every commit. Size rather than extension is the axis that matters: uploads land
+under `<folder>/logs/` keeping the uploader's extension and `.log` is a viewable
+document type, so excluding `*.log` meant uploading a log reported success and
+versioned nothing.
 
 **Restore is not a revert.** The old markdown is re-rendered through the normal
 generator and lands as a new snapshot on top, after the state being replaced is

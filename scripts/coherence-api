@@ -29,6 +29,12 @@ body="${2:-}"
 
 env_file="${COHERENCE_HOME:-$HOME/coherence}/.env"
 
+# A request body is written to a private temp file rather than passed inline, so
+# it is never visible in argv either.
+tmp_body=$(mktemp "${TMPDIR:-/tmp}/coherence-api.XXXXXX")
+chmod 600 "$tmp_body"
+trap 'rm -f "$tmp_body"' EXIT INT TERM
+
 # Read one KEY=value from the server's .env, stripping inline comments,
 # surrounding quotes and trailing space. Values already exported win.
 read_env() {
@@ -50,10 +56,26 @@ esac
 
 args=(--silent --show-error --fail-with-body)
 if [ -n "$body" ]; then
-    args+=(-X POST -H "Content-Type: application/json" --data-binary "$body")
-fi
-if [ -n "$key" ]; then
-    args+=(-H "Authorization: Bearer $key")
+    # --data-binary @- would read a file if the body began with "@"; the
+    # explicit form below cannot be reinterpreted that way.
+    args+=(-X POST -H "Content-Type: application/json")
 fi
 
-curl "${args[@]}" "http://127.0.0.1:${port}${path}"
+# The token must not go in argv: /proc/<pid>/cmdline is world-readable here, so
+# any local process can read it out of the running curl. Pass it through a
+# config file on stdin instead, which only this curl can see.
+run_curl() {
+    if [ -n "$key" ]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$key" \
+            | curl "${args[@]}" --config - "$@" "http://127.0.0.1:${port}${path}"
+    else
+        curl "${args[@]}" "$@" "http://127.0.0.1:${port}${path}"
+    fi
+}
+
+if [ -n "$body" ]; then
+    printf '%s' "$body" > "$tmp_body"
+    run_curl --data-binary "@$tmp_body"
+else
+    run_curl
+fi

@@ -92,8 +92,13 @@ func cmdGenerate(appCfg *config.Config, cfg *docgen.Config, args []string) {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
-	snapshot(appCfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
+	versioned := snapshot(appCfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
 	fmt.Println(url)
+	if !versioned {
+		// Non-zero so a caller that checks exit status does not treat an
+		// unversioned write as a clean one. The document itself was written.
+		os.Exit(3)
+	}
 }
 
 func cmdSetPassword(cfg *config.Config) {
@@ -211,9 +216,12 @@ func cmdLegacy(dgCfg *docgen.Config, cfg *config.Config) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	snapshot(cfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
+	versioned := snapshot(cfg, "cli generate "+*folder+"/"+docLabel(*filename, *title))
 	out, _ := json.Marshal(map[string]string{"url": url})
 	fmt.Println(string(out))
+	if !versioned {
+		os.Exit(3)
+	}
 }
 
 // docLabel names the document a snapshot reason refers to, so history reads as
@@ -228,18 +236,24 @@ func docLabel(filename, title string) string {
 // snapshot records a CLI-side doc write in the version history. The CLI is
 // short-lived, so the commit is synchronous rather than debounced; the store
 // retries on index.lock in case the server is snapshotting at the same moment.
-func snapshot(cfg *config.Config, reason string) {
+// snapshot records a CLI-side doc write and reports whether it was versioned.
+// The caller prints the URL on stdout, so an agent reading that URL would
+// otherwise conclude the document was both generated and versioned when only
+// the first was true.
+func snapshot(cfg *config.Config, reason string) bool {
 	if cfg == nil || !cfg.VersioningEnabled {
-		return
+		return true // versioning is off by choice; nothing was lost
 	}
 	store, err := versioning.New(cfg.VersionsDir, cfg.DataDir, versioning.DefaultDebounce)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: version snapshot skipped: %v\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "warning: NOT versioned — %v\n", err)
+		return false
 	}
 	if err := store.CommitNow(reason); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: version snapshot failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: NOT versioned — %v\n", err)
+		return false
 	}
+	return true
 }
 
 func usage() {
@@ -270,9 +284,10 @@ func remotePost(cfg *config.Config, path string, payload map[string]any) (map[st
 	if cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
-	client := http.DefaultClient
+	client := &http.Client{Timeout: 60 * time.Second}
 	if cfg.SkipTLSVerify {
 		client = &http.Client{
+			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 			},
@@ -407,6 +422,7 @@ func cmdRemoteLegacy(cfg *config.Config) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	out, _ := json.Marshal(map[string]string{"url": result["url"].(string)})
+	urlStr, _ := result["url"].(string)
+	out, _ := json.Marshal(map[string]string{"url": urlStr})
 	fmt.Println(string(out))
 }

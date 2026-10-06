@@ -2,8 +2,10 @@ package server
 
 import (
 	"coherence/internal/docgen"
+	"coherence/internal/versioning"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,16 +63,13 @@ func (h *Handler) handleDocHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit == 0 {
+	if limit <= 0 || limit > maxHistory {
 		limit = 50
 	}
-	revs, err := h.ver.History(rel, limit)
+	revs, err := h.revisionsFor(folder, file, rel, limit)
 	if err != nil {
 		sendJSON(w, 500, map[string]any{"error": err.Error()})
 		return
-	}
-	if revs == nil {
-		revs = nil // keep the JSON an empty array rather than null
 	}
 	out := make([]map[string]any, 0, len(revs))
 	for _, rv := range revs {
@@ -86,11 +85,48 @@ func (h *Handler) handleDocHistory(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, 200, map[string]any{"ok": true, "path": rel, "revisions": out})
 }
 
+// maxHistory bounds how many revisions any endpoint will consider. Every
+// lookup uses the same bound, so a revision that /doc-history lists is always
+// one that /doc-version and /restore-doc can resolve.
+const maxHistory = 200
+
+// revisionsFor returns the snapshots that belong to this document, newest
+// first. Identity, not path, decides membership — see Store.FilterByIdentity.
+func (h *Handler) revisionsFor(folder, file, rel string, limit int) ([]versioning.Revision, error) {
+	if limit <= 0 || limit > maxHistory {
+		limit = maxHistory
+	}
+	revs, err := h.ver.History(rel, maxHistory)
+	if err != nil {
+		return nil, err
+	}
+	uid := h.currentDocUID(folder, file)
+	revs = h.ver.FilterByIdentity(revs, uid, docgen.ExtractUID)
+	if len(revs) > limit {
+		revs = revs[:limit]
+	}
+	return revs, nil
+}
+
+// currentDocUID reads the id of the document as it stands now. An empty result
+// means the document predates ids, or is gone from disk.
+func (h *Handler) currentDocUID(folder, file string) string {
+	_, dest := safeDocPath(h.cfg.DataDir, folder, file)
+	if dest == "" {
+		return ""
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		return ""
+	}
+	return docgen.ExtractUID(data)
+}
+
 // sourceAt returns the markdown source of a document as of rev. The second
 // result is false when the blob is not a generated doc (so it carries no
 // embedded source) — the raw bytes are returned in that case.
-func (h *Handler) sourceAt(rel, rev string) (string, bool, error) {
-	revs, err := h.ver.History(rel, 200)
+func (h *Handler) sourceAt(folder, file, rel, rev string) (string, bool, error) {
+	revs, err := h.revisionsFor(folder, file, rel, maxHistory)
 	if err != nil {
 		return "", false, err
 	}
@@ -98,7 +134,7 @@ func (h *Handler) sourceAt(rel, rev string) (string, bool, error) {
 	// caller: it is the only way to follow a rename, and it means no
 	// client-supplied path ever reaches git.
 	for _, rv := range revs {
-		if strings.EqualFold(rv.Rev, rev) || rv.Short == strings.ToLower(rev) {
+		if revMatches(rv, rev) {
 			blob, err := h.ver.FileAt(rv.Rev, rv.Path)
 			if err != nil {
 				// The revision is listed but its blob will not read — treat it
@@ -143,7 +179,7 @@ func (h *Handler) handleDocVersion(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 400, map[string]any{"error": "folder, file and rev required"})
 		return
 	}
-	src, isMarkdown, err := h.sourceAt(rel, rev)
+	src, isMarkdown, err := h.sourceAt(folder, file, rel, rev)
 	if err == os.ErrNotExist {
 		sendJSON(w, 404, map[string]any{"error": "revision not found for this document"})
 		return
@@ -171,7 +207,7 @@ func (h *Handler) handleDocDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromSrc, _, err := h.sourceAt(rel, from)
+	fromSrc, _, err := h.sourceAt(folder, file, rel, from)
 	if err == os.ErrNotExist {
 		sendJSON(w, 404, map[string]any{"error": "revision not found for this document"})
 		return
@@ -190,7 +226,7 @@ func (h *Handler) handleDocDiff(w http.ResponseWriter, r *http.Request) {
 		}
 		toSrc, toLabel = src, "current"
 	} else {
-		src, _, err := h.sourceAt(rel, to)
+		src, _, err := h.sourceAt(folder, file, rel, to)
 		if err == os.ErrNotExist {
 			sendJSON(w, 404, map[string]any{"error": "revision not found for this document"})
 			return
@@ -240,7 +276,7 @@ func (h *Handler) handleRestoreDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	src, isMarkdown, err := h.sourceAt(rel, rev)
+	src, isMarkdown, err := h.sourceAt(folder, file, rel, rev)
 	if err == os.ErrNotExist {
 		sendJSON(w, 404, map[string]any{"error": "revision not found for this document"})
 		return
@@ -256,11 +292,22 @@ func (h *Handler) handleRestoreDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capture what is about to be replaced before replacing it.
-	h.ver.CommitNow("pre-restore state of " + rel)
+	// Capture what is about to be replaced before replacing it. This must be
+	// enforced, not attempted: the error used to be discarded, so if the commit
+	// failed (a stale index.lock is enough) the restore still overwrote the
+	// file and the replaced content existed in no commit and no file, while the
+	// response still said ok. Refusing is the only safe answer, since the whole
+	// promise of restore is that it costs nothing.
+	if err := h.ver.CommitNow("pre-restore state of " + rel); err != nil {
+		sendJSON(w, 503, map[string]any{
+			"error": "refusing to restore: could not snapshot the current version first, " +
+				"so it would not be recoverable (" + err.Error() + ")",
+		})
+		return
+	}
 
 	title := ""
-	if blob, _, berr := h.sourceAtBlob(rel, rev); berr == nil {
+	if blob, _, berr := h.sourceAtBlob(folder, file, rel, rev); berr == nil {
 		title = docgen.ExtractTitle(blob)
 	}
 	if title == "" {
@@ -272,7 +319,11 @@ func (h *Handler) handleRestoreDoc(w http.ResponseWriter, r *http.Request) {
 		title = strings.TrimSuffix(filepath.Base(rel), ".html")
 	}
 
-	docURL, genErr := docgen.GenerateDoc(h.dgCfg, folder, title, src, filepath.Base(rel))
+	// Write to the path that was validated, not to the raw input. Passing the
+	// caller's folder string straight through means the path checked and the
+	// path written can differ, so a restore could read one document's history
+	// and write the content somewhere else while reporting success.
+	docURL, genErr := docgen.GenerateDoc(h.dgCfg, path.Dir(rel), title, src, filepath.Base(rel))
 	if genErr != nil {
 		sendJSON(w, 500, map[string]any{"error": genErr.Error()})
 		return
@@ -283,18 +334,31 @@ func (h *Handler) handleRestoreDoc(w http.ResponseWriter, r *http.Request) {
 
 // sourceAtBlob returns the raw blob of a document at rev, resolving the path
 // through the revision list the same way sourceAt does.
-func (h *Handler) sourceAtBlob(rel, rev string) ([]byte, string, error) {
-	revs, err := h.ver.History(rel, 200)
+func (h *Handler) sourceAtBlob(folder, file, rel, rev string) ([]byte, string, error) {
+	revs, err := h.revisionsFor(folder, file, rel, maxHistory)
 	if err != nil {
 		return nil, "", err
 	}
 	for _, rv := range revs {
-		if strings.EqualFold(rv.Rev, rev) || rv.Short == strings.ToLower(rev) {
+		if revMatches(rv, rev) {
 			blob, err := h.ver.FileAt(rv.Rev, rv.Path)
 			return blob, rv.Path, err
 		}
 	}
 	return nil, "", os.ErrNotExist
+}
+
+// revMatches accepts a full SHA or any abbreviation of it. The previous
+// comparison only matched the full SHA or exactly 8 characters, so a 7- or
+// 9-character prefix — which the revision regex advertises as valid — never
+// resolved.
+func revMatches(rv versioning.Revision, rev string) bool {
+	rev = strings.ToLower(strings.TrimSpace(rev))
+	if rev == "" {
+		return false
+	}
+	full := strings.ToLower(rv.Rev)
+	return full == rev || (len(rev) >= 7 && strings.HasPrefix(full, rev))
 }
 
 func shortLabel(rev string) string {

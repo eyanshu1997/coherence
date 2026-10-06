@@ -67,6 +67,11 @@ var mutatingEndpoints = []struct {
 	{"/exclude-session", `{"folder":"victim","session_id":"x"}`},
 	{"/reindex", `{}`},
 	{"/auth/share/create", `{"path":"/victim/doc.html","days":30}`},
+	// Omitted when this list was written, including the endpoint the version
+	// history feature added.
+	{"/restore-doc", `{"folder":"victim","file":"doc","rev":"abcdef12"}`},
+	{"/upload-file", `{}`},
+	{"/upload-image", `{}`},
 }
 
 // postAs sends a request the way nginx forwards one: from loopback, but with

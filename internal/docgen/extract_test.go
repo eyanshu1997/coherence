@@ -88,3 +88,88 @@ func TestExtractRawMarkdownScriptTerminator(t *testing.T) {
 		t.Error("extraction truncated at the embedded close tag")
 	}
 }
+
+// The CLI passes --folder straight through, so containment has to live in the
+// generator. Without it, "--folder ../../.ssh" wrote a document into ~/.ssh and
+// chmod 0755'd every directory up to the filesystem root on the way out.
+func TestGenerateDocRefusesEscapingFolder(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	victim := filepath.Join(root, "victim")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(victim, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{DataDir: dataDir, DocBase: "http://localhost"}
+
+	for _, folder := range []string{"../victim", "../../victim", "a/../../victim", "/etc"} {
+		if _, err := GenerateDoc(cfg, folder, "Escape", "# x\n", "esc.html"); err == nil {
+			t.Errorf("folder %q should have been refused", folder)
+		}
+		if _, err := os.Stat(filepath.Join(victim, "esc.html")); err == nil {
+			t.Fatalf("folder %q escaped the data dir", folder)
+		}
+	}
+	// The victim directory's permissions must be untouched.
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0700 {
+		t.Errorf("ancestor permissions were relaxed to %v", info.Mode().Perm())
+	}
+}
+
+// A document named "index" was written and then destroyed by the folder index
+// inside the same call, with a 200 and a working URL returned, and was excluded
+// from snapshots so it was unrecoverable.
+func TestGenerateDocRefusesReservedName(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{DataDir: dir, DocBase: "http://localhost"}
+	if _, err := GenerateDoc(cfg, "notes", "Index", "# MY IMPORTANT CONTENT\n", "index.html"); err == nil {
+		t.Fatal("writing a doc named index.html should be refused")
+	}
+	// And the folder index itself must still be generatable.
+	if _, err := GenerateDoc(cfg, "notes", "Real Doc", "# fine\n", "real.html"); err != nil {
+		t.Fatalf("a normal doc should still generate: %v", err)
+	}
+}
+
+// The id has to survive every rewrite, or history loses track of the document.
+func TestDocUIDIsStableAcrossWrites(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{DataDir: dir, DocBase: "http://localhost"}
+	read := func() string {
+		data, err := os.ReadFile(filepath.Join(dir, "proj", "d.html"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ExtractUID(data)
+	}
+	if _, err := GenerateDoc(cfg, "proj", "D", "# one\n", "d.html"); err != nil {
+		t.Fatal(err)
+	}
+	first := read()
+	if first == "" {
+		t.Fatal("no document id was assigned")
+	}
+	if _, err := GenerateDoc(cfg, "proj", "D", "# two\n", "d.html"); err != nil {
+		t.Fatal(err)
+	}
+	if second := read(); second != first {
+		t.Errorf("id changed on rewrite: %q -> %q", first, second)
+	}
+	// A different document must get a different id.
+	if _, err := GenerateDoc(cfg, "proj", "E", "# other\n", "e.html"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := os.ReadFile(filepath.Join(dir, "proj", "e.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ExtractUID(other) == first {
+		t.Error("two documents share an id")
+	}
+}

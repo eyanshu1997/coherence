@@ -37,6 +37,7 @@ type Config struct {
 	VersionsDir             string
 	VersionDebounceSec      int
 	VersionSweepSec         int
+	VersionMaxBlobMB        int
 }
 
 func Load() *Config {
@@ -92,7 +93,8 @@ func Load() *Config {
 		VersionDebounceSec: atoiOr(getenv("COHERENCE_VERSION_DEBOUNCE_SEC", "60"), 60),
 		// Safety net for changes that reach the data dir without going through
 		// the CLI or an API handler, which therefore never nudge. 0 disables.
-		VersionSweepSec: atoiOrZero(getenv("COHERENCE_VERSION_SWEEP_SEC", "900"), 900),
+		VersionSweepSec:  atoiOrZero(getenv("COHERENCE_VERSION_SWEEP_SEC", "900"), 900),
+		VersionMaxBlobMB: atoiOrZero(getenv("COHERENCE_VERSION_MAX_BLOB_MB", "8"), 8),
 	}
 }
 

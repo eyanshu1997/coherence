@@ -15,10 +15,12 @@ package versioning
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,13 +53,21 @@ const maxReasons = 6
 var excludePatterns = []string{
 	"# Managed by coherence — edits here are overwritten on server start.",
 	"index.html",
-	"*.log",
-	"*.jsonl",
 	"*.pyc",
 	"__pycache__/",
 	".git/",
 	".DS_Store",
 }
+
+// DefaultMaxBlobBytes bounds what a snapshot will take in.
+//
+// This used to be an extension list (*.log, *.jsonl), which was the wrong axis:
+// the upload handler puts every generic upload under <folder>/logs/ keeping the
+// uploader's extension, and .log is a first-class viewable document type — so
+// uploading a log returned ok and then silently versioned nothing. Size is the
+// property actually worth excluding on. One log in a real tree is 66MB; the
+// small ones are recoverable like any other document.
+const DefaultMaxBlobBytes = 8 << 20
 
 var (
 	revRe   = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
@@ -85,10 +95,13 @@ type Store struct {
 	debounce time.Duration
 	maxDelay time.Duration
 
+	maxBlob int64
+
 	mu      sync.Mutex
 	timer   *time.Timer
 	reasons []string
 	firstAt time.Time
+	lastErr error
 
 	// commitSeq serializes the add+commit pair. Index manipulation is not
 	// concurrency-safe and the async reindex goroutines can overlap.
@@ -122,6 +135,7 @@ func New(gitDir, workTree string, debounce time.Duration) (*Store, error) {
 		workTree: wt,
 		debounce: debounce,
 		maxDelay: debounce * maxDelayFactor,
+		maxBlob:  DefaultMaxBlobBytes,
 	}
 	if err := s.init(); err != nil {
 		return nil, err
@@ -148,6 +162,9 @@ func (s *Store) init() error {
 		{"user.email", "coherence@localhost"},
 		{"commit.gpgsign", "false"},
 		{"gc.auto", "256"},
+		// Explicit rather than relying on the side effect of core.bare=false:
+		// without a reflog, a clobbered ref would have no recovery path.
+		{"core.logAllRefUpdates", "true"},
 	}
 	for _, kv := range cfg {
 		if _, err := s.run("config", kv[0], kv[1]); err != nil {
@@ -159,7 +176,56 @@ func (s *Store) init() error {
 		return err
 	}
 	body := strings.Join(excludePatterns, "\n") + "\n"
-	return os.WriteFile(filepath.Join(infoDir, "exclude"), []byte(body), 0600)
+	if err := os.WriteFile(filepath.Join(infoDir, "exclude"), []byte(body), 0600); err != nil {
+		return err
+	}
+	s.warnInTreeIgnores()
+	return nil
+}
+
+// warnInTreeIgnores reports .gitignore files inside the doc tree. info/exclude
+// is managed here, but an in-tree .gitignore is also honoured — and copying a
+// repo-shaped folder into the data dir is a normal workflow, which can import
+// rules that quietly stop real documents from being versioned.
+func (s *Store) warnInTreeIgnores() {
+	filepath.Walk(s.workTree, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") && path != s.workTree {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Name() == ".gitignore" {
+			rel, _ := filepath.Rel(s.workTree, path)
+			log.Printf("versioning: %s is honoured by snapshots and may exclude documents; "+
+				"check it with: git --git-dir=%s --work-tree=%s check-ignore -v <path>",
+				filepath.ToSlash(rel), s.gitDir, s.workTree)
+		}
+		return nil
+	})
+}
+
+// SetMaxBlobBytes overrides the size above which a file is left out of
+// snapshots. Zero disables the limit.
+func (s *Store) SetMaxBlobBytes(n int64) {
+	if s == nil {
+		return
+	}
+	s.maxBlob = n
+}
+
+// LastError reports the most recent snapshot failure, so callers can surface a
+// store that has silently stopped recording. Nil once a snapshot succeeds.
+func (s *Store) LastError() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastErr
 }
 
 // Enabled reports whether snapshots are being taken.
@@ -233,7 +299,7 @@ func (s *Store) Nudge(reason string) {
 	defer s.mu.Unlock()
 
 	if len(s.reasons) < maxReasons {
-		s.reasons = append(s.reasons, reason)
+		s.reasons = append(s.reasons, sanitizeReason(reason))
 	} else {
 		s.reasons[maxReasons-1] = "…"
 	}
@@ -248,6 +314,20 @@ func (s *Store) Nudge(reason string) {
 		s.timer.Stop()
 	}
 	s.timer = time.AfterFunc(s.debounce, s.fire)
+}
+
+// sanitizeReason strips the bytes History() uses as field delimiters, plus
+// newlines. Reasons are built from caller-supplied folder and file names, so a
+// name containing \x1f could otherwise shift the parsed fields and forge the
+// author shown against a revision.
+func sanitizeReason(reason string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 0x00, 0x1f, '\n', '\r':
+			return ' '
+		}
+		return r
+	}, reason)
 }
 
 // drainLocked consumes the pending reasons and returns a commit subject.
@@ -277,7 +357,22 @@ func (s *Store) fire() {
 	if msg == "" {
 		return
 	}
-	s.commit(msg)
+	s.record(msg, s.commit(msg))
+}
+
+// record stores and logs a snapshot outcome. A failure used to be dropped
+// entirely: the pending reasons had already been cleared, nothing rescheduled
+// the attempt, and the only symptom was that no new commits appeared.
+func (s *Store) record(msg string, err error) {
+	s.mu.Lock()
+	s.lastErr = err
+	s.mu.Unlock()
+	if err == nil {
+		return
+	}
+	log.Printf("versioning: snapshot failed (%s): %v", msg, err)
+	// Put the work back so the next tick retries instead of losing it.
+	s.Nudge("retry after failure")
 }
 
 // fireLocked is the max-delay path; the caller already holds s.mu.
@@ -305,10 +400,14 @@ func (s *Store) CommitNow(reason string) error {
 		s.timer.Stop()
 		s.timer = nil
 	}
-	s.reasons = append(s.reasons, reason)
+	s.reasons = append(s.reasons, sanitizeReason(reason))
 	msg := s.drainLocked()
 	s.mu.Unlock()
-	return s.commit(msg)
+	err := s.commit(msg)
+	s.mu.Lock()
+	s.lastErr = err
+	s.mu.Unlock()
+	return err
 }
 
 // RunPeriodic snapshots the tree on a fixed interval until stop is closed.
@@ -332,7 +431,9 @@ func (s *Store) RunPeriodic(interval time.Duration, stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
-			s.CommitNow("periodic sweep")
+			if err := s.CommitNow("periodic sweep"); err != nil {
+				log.Printf("versioning: periodic snapshot failed: %v", err)
+			}
 		}
 	}
 }
@@ -340,6 +441,13 @@ func (s *Store) RunPeriodic(interval time.Duration, stop <-chan struct{}) {
 func (s *Store) commit(msg string) error {
 	s.commitSeq.Lock()
 	defer s.commitSeq.Unlock()
+
+	// Oversized files are excluded per commit rather than by extension, so a
+	// file that grows past the limit stops being staged and one that is
+	// replaced by something small starts again.
+	if err := s.writeSizeExcludes(); err != nil {
+		log.Printf("versioning: could not refresh size excludes: %v", err)
+	}
 
 	// commitSeq only serializes this process. The coherence-doc CLI snapshots
 	// from a separate process against the same index, so a lost race on
@@ -376,6 +484,58 @@ func (s *Store) commit(msg string) error {
 		time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond)
 	}
 	return err
+}
+
+// writeSizeExcludes regenerates the size-based half of $GIT_DIR/info/exclude.
+// The static patterns are rewritten with it so the file always has both halves.
+func (s *Store) writeSizeExcludes() error {
+	body := strings.Join(excludePatterns, "\n") + "\n"
+	if s.maxBlob > 0 {
+		var oversized []string
+		filepath.Walk(s.workTree, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				if strings.HasPrefix(info.Name(), ".") && path != s.workTree {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if info.Size() <= s.maxBlob {
+				return nil
+			}
+			rel, err := filepath.Rel(s.workTree, path)
+			if err != nil {
+				return nil
+			}
+			// A leading slash anchors the pattern at the repository root, and
+			// the escape keeps a literal "[" or "*" in a filename from being
+			// read as a glob.
+			oversized = append(oversized, "/"+escapeGlob(filepath.ToSlash(rel)))
+			return nil
+		})
+		if len(oversized) > 0 {
+			sort.Strings(oversized)
+			body += "\n# Excluded for exceeding the size limit; regenerated every commit.\n"
+			body += strings.Join(oversized, "\n") + "\n"
+		}
+	}
+	return os.WriteFile(filepath.Join(s.gitDir, "info", "exclude"), []byte(body), 0600)
+}
+
+// escapeGlob quotes the gitignore pattern metacharacters so a path is matched
+// literally.
+func escapeGlob(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		switch r {
+		case '*', '?', '[', ']', '\\', '!', '#':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // isLockContention reports whether an error is another process holding the
@@ -454,64 +614,50 @@ func (s *Store) History(relPath string, limit int) ([]Revision, error) {
 		}
 		revs = append(revs, rev)
 	}
-	return s.truncateFalseRenames(revs, relPath), nil
+	return revs, nil
 }
 
-// truncateFalseRenames drops revisions that --follow attributed to a different
-// document.
+// FilterByIdentity keeps only the revisions whose blob is the same document as
+// uid, and drops the rest.
 //
-// Rename detection is a content-similarity guess, and it is a bad one here:
-// every generated doc shares the entire HTML template, so two unrelated short
-// docs are ~98% alike and git will happily report a brand-new doc as a rename of
-// whichever existing doc it resembles most. The result is a revision whose
-// content belongs to someone else's document — which restore would then write
-// over the real one.
+// This replaces guessing. git decides renames by content similarity, which is
+// useless for this corpus: every generated doc carries the whole HTML template,
+// so two unrelated short docs are ~98% alike and --follow will present a
+// brand-new document's first revision as whichever existing doc it resembles.
+// A previous attempt discriminated by whether the attributed path still existed
+// in HEAD, which closed only half the hole — a path that had been *deleted* was
+// accepted, so a deleted document's content surfaced as another document's
+// history and restore would write it over the live one. And when a path is
+// reused (delete then recreate the same slug) every revision's path matches, so
+// there was nothing to discriminate on at all.
 //
-// The discriminator is not similarity but existence: a genuine rename means the
-// old path is gone from the current tree, whereas a false attribution points at
-// a document that is still right there. So accept a path change only when that
-// path no longer exists in HEAD, and truncate the history at the first one that
-// does.
+// Identity is the only sound answer: each generated doc embeds a stable id that
+// survives edits, renames and moves. A revision counts as this document's
+// history when its blob carries the same id.
 //
-// It fails safe. If a doc is renamed A->B and a new doc is later created at A,
-// B's history stops at the rename instead of reaching back through A. Earlier
-// revisions are still in the repository, just not offered for restore.
-func (s *Store) truncateFalseRenames(revs []Revision, relPath string) []Revision {
-	var differs bool
+// uid == "" means the current document predates ids. Nothing can be verified in
+// that case, so only revisions at the exact same path are kept — no rename
+// following, but never another document's content.
+func (s *Store) FilterByIdentity(revs []Revision, uid string, idOf func([]byte) string) []Revision {
+	if s == nil || len(revs) == 0 {
+		return revs
+	}
+	out := make([]Revision, 0, len(revs))
 	for _, rv := range revs {
-		if rv.Path != relPath {
-			differs = true
-			break
+		blob, err := s.FileAt(rv.Rev, rv.Path)
+		if err != nil {
+			continue // unreadable blob: not offerable, so not history
+		}
+		got := idOf(blob)
+		switch {
+		case uid != "" && got == uid:
+			out = append(out, rv)
+		case uid == "" && got == "" && rv.Path == revs[0].Path:
+			// Pre-id document: same path only.
+			out = append(out, rv)
 		}
 	}
-	if !differs {
-		return revs // no rename claimed; nothing to validate
-	}
-
-	tracked := s.trackedInHead()
-	for i, rv := range revs {
-		if rv.Path != relPath && tracked[rv.Path] {
-			return revs[:i]
-		}
-	}
-	return revs
-}
-
-// trackedInHead returns the set of paths present in the current commit. An
-// empty set (unborn HEAD, or an error) makes truncateFalseRenames a no-op,
-// which is the same behaviour as before validation.
-func (s *Store) trackedInHead() map[string]bool {
-	out, err := s.run("ls-tree", "-r", "--name-only", "HEAD")
-	if err != nil {
-		return nil
-	}
-	set := make(map[string]bool)
-	for _, line := range strings.Split(string(out), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			set[line] = true
-		}
-	}
-	return set
+	return out
 }
 
 // FileAt returns the bytes of relPath as of rev.
