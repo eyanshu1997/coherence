@@ -1638,6 +1638,8 @@ func patchDocVars(path, folder, filenameStem string) {
 func rewriteFolderLinks(folderPath, oldRel, newRel string) {
 	oldSeg := "/" + strings.Trim(oldRel, "/") + "/"
 	newSeg := "/" + strings.Trim(newRel, "/") + "/"
+	newRelJSON, _ := json.Marshal(strings.Trim(newRel, "/"))
+	docFolderRe := regexp.MustCompile(`(window\.DOC_FOLDER\s*=\s*)"[^"]*"`)
 	entries, _ := filepath.Glob(filepath.Join(folderPath, "*.html"))
 	for _, htmlFile := range entries {
 		if filepath.Base(htmlFile) == "index.html" {
@@ -1648,13 +1650,13 @@ func rewriteFolderLinks(folderPath, oldRel, newRel string) {
 			continue
 		}
 		s := string(data)
-		if !strings.Contains(s, oldSeg) {
+		// A doc with no internal cross-links still carries window.DOC_FOLDER, which the
+		// browser posts comments against — so never skip on the link segment alone.
+		updated := strings.ReplaceAll(s, oldSeg, newSeg)
+		updated = docFolderRe.ReplaceAllString(updated, `${1}`+string(newRelJSON))
+		if updated == s {
 			continue
 		}
-		s = strings.ReplaceAll(s, oldSeg, newSeg)
-		newRelJSON, _ := json.Marshal(strings.Trim(newRel, "/"))
-		s = regexp.MustCompile(`(window\.DOC_FOLDER\s*=\s*)"[^"]*"`).
-			ReplaceAllString(s, `${1}`+string(newRelJSON))
-		os.WriteFile(htmlFile, []byte(s), 0644)
+		os.WriteFile(htmlFile, []byte(updated), 0644)
 	}
 }
