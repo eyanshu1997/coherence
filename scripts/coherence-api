@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# coherence-api — call the local coherence API with authentication.
+#
+# Every mutating endpoint requires a Bearer token when COHERENCE_API_KEY is
+# configured. A browser is authenticated by the auth proxy instead, but agents
+# and skills reach the API with curl, which carries no credentials — so those
+# calls get 401. This wrapper reads the key out of the server's own .env and
+# adds the header, which keeps the secret in one place instead of inlined into
+# every agent doc.
+#
+# Usage:
+#   coherence-api /reply-comment '{"folder":"f","file":"s","ts":"...","reply":"x"}'
+#   coherence-api /acknowledge   '{"folder":"f","file":"s","ts":"..."}'
+#   coherence-api '/doc-history?folder=f&file=s'
+#
+# A JSON body makes the call a POST; without one it is a GET. The path may be
+# given with or without the /comment-api prefix. Exits non-zero on an HTTP
+# error, printing the server's JSON error body.
+
+set -euo pipefail
+
+path="${1:-}"
+if [ -z "$path" ]; then
+    echo "usage: coherence-api <path> [json-body]" >&2
+    exit 2
+fi
+body="${2:-}"
+
+env_file="${COHERENCE_HOME:-$HOME/coherence}/.env"
+
+# Read one KEY=value from the server's .env, stripping inline comments,
+# surrounding quotes and trailing space. Values already exported win.
+read_env() {
+    [ -f "$env_file" ] || return 0
+    sed -n "s/^[[:space:]]*$1=//p" "$env_file" \
+        | tail -1 \
+        | sed 's/[[:space:]]#.*$//; s/^"//; s/"$//; s/^'\''//; s/'\''$//; s/[[:space:]]*$//'
+}
+
+key="${COHERENCE_API_KEY:-$(read_env COHERENCE_API_KEY)}"
+port="${COHERENCE_PORT:-$(read_env COHERENCE_PORT)}"
+port="${port:-9181}"
+
+case "$path" in
+    /comment-api/*) ;;
+    /*)  path="/comment-api$path" ;;
+    *)   path="/comment-api/$path" ;;
+esac
+
+args=(--silent --show-error --fail-with-body)
+if [ -n "$body" ]; then
+    args+=(-X POST -H "Content-Type: application/json" --data-binary "$body")
+fi
+if [ -n "$key" ]; then
+    args+=(-H "Authorization: Bearer $key")
+fi
+
+curl "${args[@]}" "http://127.0.0.1:${port}${path}"
