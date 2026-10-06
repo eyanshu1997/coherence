@@ -410,6 +410,11 @@ func (s *Store) History(relPath string, limit int) ([]Revision, error) {
 	// Those carry no blob, so listing them would offer a version that cannot be
 	// read or restored. Excluding them also means a deleted document's history
 	// still ends at its last real content, which is what makes it recoverable.
+	//
+	// --follow's rename attribution has to be validated, not trusted — see
+	// truncateFalseRenames. Similarity thresholds cannot do it: every generated
+	// doc shares the whole HTML template, so two unrelated short docs are ~98%
+	// alike.
 	out, err := s.run("log", "--follow", "--diff-filter=d", "-n", strconv.Itoa(limit),
 		"--format=%x00%H%x1f%at%x1f%s%x1f%an", "--name-only", "--", relPath)
 	if err != nil {
@@ -449,7 +454,64 @@ func (s *Store) History(relPath string, limit int) ([]Revision, error) {
 		}
 		revs = append(revs, rev)
 	}
-	return revs, nil
+	return s.truncateFalseRenames(revs, relPath), nil
+}
+
+// truncateFalseRenames drops revisions that --follow attributed to a different
+// document.
+//
+// Rename detection is a content-similarity guess, and it is a bad one here:
+// every generated doc shares the entire HTML template, so two unrelated short
+// docs are ~98% alike and git will happily report a brand-new doc as a rename of
+// whichever existing doc it resembles most. The result is a revision whose
+// content belongs to someone else's document — which restore would then write
+// over the real one.
+//
+// The discriminator is not similarity but existence: a genuine rename means the
+// old path is gone from the current tree, whereas a false attribution points at
+// a document that is still right there. So accept a path change only when that
+// path no longer exists in HEAD, and truncate the history at the first one that
+// does.
+//
+// It fails safe. If a doc is renamed A->B and a new doc is later created at A,
+// B's history stops at the rename instead of reaching back through A. Earlier
+// revisions are still in the repository, just not offered for restore.
+func (s *Store) truncateFalseRenames(revs []Revision, relPath string) []Revision {
+	var differs bool
+	for _, rv := range revs {
+		if rv.Path != relPath {
+			differs = true
+			break
+		}
+	}
+	if !differs {
+		return revs // no rename claimed; nothing to validate
+	}
+
+	tracked := s.trackedInHead()
+	for i, rv := range revs {
+		if rv.Path != relPath && tracked[rv.Path] {
+			return revs[:i]
+		}
+	}
+	return revs
+}
+
+// trackedInHead returns the set of paths present in the current commit. An
+// empty set (unborn HEAD, or an error) makes truncateFalseRenames a no-op,
+// which is the same behaviour as before validation.
+func (s *Store) trackedInHead() map[string]bool {
+	out, err := s.run("ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			set[line] = true
+		}
+	}
+	return set
 }
 
 // FileAt returns the bytes of relPath as of rev.

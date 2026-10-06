@@ -236,3 +236,44 @@ func TestVersioningDisabledReturns503(t *testing.T) {
 		t.Errorf("expected 503 when versioning is off, got %d", code)
 	}
 }
+
+// A newly created document must not inherit an unrelated document's history.
+//
+// Generated docs share the entire HTML template — header, footer, script and
+// stylesheet tags — so two short docs clear git's default 50% rename-similarity
+// threshold. --follow then attributes a brand-new doc's first revision to
+// whichever existing doc looked most alike, offering a revision whose content
+// belongs to a different document and which restore would happily write over it.
+func TestNewDocDoesNotInheritUnrelatedHistory(t *testing.T) {
+	ts, _, store := newVersionedServer(t, "k")
+
+	if code, body := doJSON(t, "POST", ts.URL+"/create-doc", "k",
+		`{"folder":"proj","title":"Unrelated Doc","filename":"unrelated.html","content":"# Unrelated\n\nNothing to do with the other doc.\n"}`); code != 200 {
+		t.Fatalf("create unrelated: %d (%v)", code, body)
+	}
+	if err := store.CommitNow("first doc"); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, body := doJSON(t, "POST", ts.URL+"/create-doc", "k",
+		`{"folder":"proj","title":"Fresh Doc","filename":"fresh.html","content":"# Fresh\n\nA completely different subject.\n"}`); code != 200 {
+		t.Fatalf("create fresh: %d (%v)", code, body)
+	}
+	if err := store.CommitNow("second doc"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs := revisionsOf(t, ts, "k", "proj", "fresh")
+	if len(revs) != 1 {
+		t.Fatalf("a freshly created doc should have exactly one revision, got %d — "+
+			"its history was attributed to another document: %v", len(revs), revs)
+	}
+
+	// And the one revision it does have must be its own content.
+	rev := revs[0].(map[string]any)["rev"].(string)
+	_, body := doJSON(t, "GET", ts.URL+"/doc-version?folder=proj&file=fresh&rev="+rev, "k", "")
+	content, _ := body["content"].(string)
+	if !strings.Contains(content, "completely different subject") {
+		t.Errorf("revision content belongs to another document: %q", content)
+	}
+}
