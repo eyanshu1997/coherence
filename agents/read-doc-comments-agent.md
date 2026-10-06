@@ -58,12 +58,14 @@ General comments (no quote) are shown as plain instructions. Quoted comments are
 After presenting the comments, mark each one as handled via the acknowledge endpoint so the browser shows a "✓ Handled" badge. Call once per comment, using the exact `ts` value from the JSON:
 
 ```bash
-COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"; source "${COHERENCE_HOME}/.env"
-COHERENCE_PORT="${COHERENCE_PORT:-8080}"
-curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
-  -H "Content-Type: application/json" \
-  -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
+COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"
+"${COHERENCE_HOME}/scripts/coherence-api" /acknowledge \
+  '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
 ```
+
+Use `scripts/coherence-api`, not bare `curl`. Mutating endpoints require the
+API key when one is configured, and a raw curl sends no credentials — it gets
+a 401. The wrapper reads the key from the server's `.env`.
 
 Run all acknowledge calls in parallel (one per comment). This is a fire-and-forget — no need to check the response.
 

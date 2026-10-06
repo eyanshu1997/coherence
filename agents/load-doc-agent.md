@@ -108,11 +108,9 @@ After loading the docs, automatically run the full `/read-doc-comments` flow for
 
 3. Acknowledge each comment:
    ```bash
-   COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"; source "${COHERENCE_HOME}/.env"
-   COHERENCE_PORT="${COHERENCE_PORT:-8080}"
-   curl -s -X POST "http://localhost:${COHERENCE_PORT}/acknowledge" \
-     -H "Content-Type: application/json" \
-     -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
+   COHERENCE_HOME="${COHERENCE_HOME:-$(dirname "$(dirname "$(which coherence-doc)")")}"
+   "${COHERENCE_HOME}/scripts/coherence-api" /acknowledge \
+     '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>"}'
    ```
    Run all acknowledge calls in parallel (fire-and-forget).
 
@@ -162,11 +160,14 @@ When presenting comments to Claude:
 
 ### How to reply to an inline comment
 
-Use the `/reply-comment` endpoint (requires auth):
+Use the `/reply-comment` endpoint. Go through `scripts/coherence-api` rather
+than bare `curl`: mutating endpoints require the API key when one is
+configured, and a raw curl sends no credentials, so it gets a 401. The wrapper
+reads the key from the server's `.env`.
+
 ```bash
-curl -s -X POST "http://localhost:${COHERENCE_PORT}/reply-comment" \
-  -H "Content-Type: application/json" \
-  -d '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>", "reply": "<your reply text>"}'
+"${COHERENCE_HOME:-$HOME/coherence}/scripts/coherence-api" /reply-comment \
+  '{"folder": "<folder>", "file": "<slug>", "ts": "<ts>", "reply": "<your reply text>"}'
 ```
 
 This sets `reply`, `reply_ts`, `reply_author`, and `handled: true` on the comment — the user will see your reply as a "Claude:" bubble inline next to the highlighted text.

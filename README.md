@@ -259,6 +259,24 @@ git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data \
     log --follow -- valtix-sw/VAL-12345/analysis.html
 ```
 
+### Calling the API from a script or agent
+
+When `COHERENCE_API_KEY` is set, every mutating endpoint requires a Bearer
+token. A browser is authenticated by the auth proxy instead, but a script
+reaching the API with plain `curl` sends no credentials and gets a 401. Use the
+wrapper, which reads the key from the server's own `.env` so the secret stays in
+one place:
+
+```bash
+scripts/coherence-api /reply-comment '{"folder":"f","file":"s","ts":"...","reply":"x"}'
+scripts/coherence-api /acknowledge   '{"folder":"f","file":"s","ts":"..."}'
+scripts/coherence-api '/doc-history?folder=f&file=s'
+```
+
+A JSON body makes the call a POST; without one it is a GET. The `/comment-api`
+prefix is optional. It exits non-zero on an HTTP error and prints the server's
+JSON error body.
+
 ### API
 
 All endpoints are owner-gated (API key, or an allowlisted identity).
