@@ -178,7 +178,7 @@ When a comment has a `quote`, present it with the doc section it belongs to in m
 ```
 [INLINE on: "the fix applied to AWS only"]
 → "Need to also handle Azure VNET case"
-  Thread: eygupta@cisco.com (2026-05-01): "Azure uses VNET peering, not TGW"
+  Thread: teammate@example.com (2026-05-01): "That cloud uses peering, not a transit gateway"
 ```
 
 When a comment has no `quote`, it's a general note on the whole doc:

@@ -43,7 +43,7 @@ func TestExtractRawMarkdownAbsent(t *testing.T) {
 func TestExtractTitle(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{DataDir: dir, DocBase: "http://localhost"}
-	title := "VAL-123 Gateway & Spoke Analysis"
+	title := "TICKET-123 Routing & Peering Analysis"
 	if _, err := GenerateDoc(cfg, "proj", title, "# body\n", "t.html"); err != nil {
 		t.Fatal(err)
 	}

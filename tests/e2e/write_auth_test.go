@@ -267,7 +267,7 @@ func TestReadEndpointsRequireAuthorization(t *testing.T) {
 	ts, dataDir := newTestServerWithUntrustedProxy(t, []string{"owner@example.com"})
 	os.MkdirAll(filepath.Join(dataDir, "secret"), 0755)
 	os.WriteFile(filepath.Join(dataDir, "secret", "doc.html"),
-		[]byte("<html><title>Secret</title><div class=\"content\">ftdv_password hunter2</div></html>"), 0644)
+		[]byte("<html><title>Secret</title><div class=\"content\">db_password hunter2</div></html>"), 0644)
 
 	for _, path := range []string{
 		"/search?q=password",
