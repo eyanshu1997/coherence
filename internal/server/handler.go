@@ -28,6 +28,7 @@ const sessionTTL = 86400 * 15 // 15 days
 
 // matches /assets/foo.js?vNN or /assets/foo.css?vNN — used to rewrite stale versions in served HTML
 var assetVerRe = regexp.MustCompile(`(/assets/[^"?]+\?)v\d+`)
+
 const maxUploadBytes = 50 * 1024 * 1024
 const maxImageBytes = 10 * 1024 * 1024
 
@@ -40,9 +41,9 @@ var allowedImageTypes = map[string]string{
 
 // Handler holds shared server state.
 type Handler struct {
-	cfg    *config.Config
-	dgCfg  *docgen.Config
-	mux    *http.ServeMux
+	cfg   *config.Config
+	dgCfg *docgen.Config
+	mux   *http.ServeMux
 }
 
 func New(cfg *config.Config, dgCfg *docgen.Config) *Handler {
@@ -69,10 +70,10 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		return
 	}
-	
+
 	user := h.currentUser(r)
 	log.Printf("Access user = %s %s %s", user, r.Method, p)
-	
+
 	switch r.Method {
 	case http.MethodGet:
 		switch p {
@@ -209,19 +210,95 @@ func (h *Handler) apiKeyOK(r *http.Request) bool {
 	return r.Header.Get("Authorization") == "Bearer "+h.cfg.APIKey
 }
 
-// apiWriteAllowed returns true when the request is permitted to call a write
-// endpoint. When no API key is configured the server is in local-only mode and
-// all writes are allowed (backward-compatible). When an API key is configured,
-// the request must present either a valid session cookie or the API key.
+// apiWriteAllowed reports whether the caller is authenticated at all. It is the
+// floor for every mutating endpoint; apiOwnerWrite adds authorization on top.
+//
+// The four deployment shapes, in order:
+//
+//	API key          → automation (the coherence-doc CLI in remote mode)
+//	password auth     → a valid docs_session cookie is required
+//	auth proxy        → an identity from the proxy is required (ALB OIDC JWT)
+//	nothing at all    → local-only mode, open
+//
+// The auth-proxy case is why this is not just a session check: with
+// ALLOWED_USERS set and no password file, loadAuthConfig returns nil and
+// sessionOK is vacuously true, so a session check alone authenticates nobody.
 func (h *Handler) apiWriteAllowed(r *http.Request) bool {
-	if h.cfg.APIKey == "" {
+	if h.apiKeyOK(r) {
 		return true
 	}
-	authCfg := h.loadAuthConfig()
-	if authCfg != nil && h.sessionOK(r) {
+	if authCfg := h.loadAuthConfig(); authCfg != nil {
+		return h.sessionOK(r)
+	}
+	if len(h.cfg.AllowedUsers) > 0 || h.cfg.AllowedDomain != "" {
+		return h.currentUser(r) != "anonymous"
+	}
+	// No API key, no password file, no allowlist: local-only mode.
+	return h.cfg.APIKey == ""
+}
+
+// apiOwnerWrite reports whether the caller may mutate the doc tree: create,
+// rename, move, delete, upload, restore, or read history.
+//
+// Being authenticated is not enough. With GUEST_ACCESS=true a reader outside the
+// allowlist is served pages in read-only mode, and the UI hides every write
+// control from them — this is the server-side half of that contract. History
+// reads are gated here too, because snapshots retain documents that were
+// deliberately deleted.
+func (h *Handler) apiOwnerWrite(r *http.Request) bool {
+	if h.apiKeyOK(r) || h.localCLI(r) {
 		return true
 	}
-	return h.apiKeyOK(r)
+	if !h.apiWriteAllowed(r) {
+		return false
+	}
+	return h.userAllowed(h.currentUser(r))
+}
+
+// localCLI reports whether a request originated on this host rather than being
+// forwarded by the auth proxy.
+//
+// A loopback RemoteAddr alone means nothing: nginx proxies to 127.0.0.1, so
+// every internet request arrives from loopback — which is why the checks this
+// replaces rejected nobody. A reverse proxy does however always stamp
+// X-Forwarded-For / X-Real-IP (and cannot be made not to by the client, since
+// proxy_set_header overwrites whatever was sent), so their absence on a loopback
+// connection does distinguish a local caller.
+//
+// Trusting that caller grants nothing new: a process on this host can already
+// write the data directory directly. It keeps the documented local workflows
+// working — the coherence-doc CLI and the curl calls the Claude skills make
+// against 127.0.0.1 with no credentials.
+// Configuring COHERENCE_API_KEY is the operator asking for authenticated
+// writes, so it disables this path entirely: local callers must then present
+// the key, which the coherence-doc CLI reads from the same .env.
+func (h *Handler) localCLI(r *http.Request) bool {
+	if h.cfg.APIKey != "" {
+		return false
+	}
+	host := r.RemoteAddr
+	if !strings.HasPrefix(host, "127.0.0.1:") && !strings.HasPrefix(host, "[::1]:") {
+		return false
+	}
+	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
+		return false
+	}
+	if h.cfg.RemoteUserJWTHeader != "" && r.Header.Get(h.cfg.RemoteUserJWTHeader) != "" {
+		return false
+	}
+	if h.cfg.RemoteUserHeader != "" && r.Header.Get(h.cfg.RemoteUserHeader) != "" {
+		return false
+	}
+	return true
+}
+
+// requireOwner writes a 401 and reports false when the caller may not mutate.
+func (h *Handler) requireOwner(w http.ResponseWriter, r *http.Request) bool {
+	if h.apiOwnerWrite(r) {
+		return true
+	}
+	sendJSON(w, 401, map[string]any{"error": "not authorized"})
+	return false
 }
 
 func parseCookies(cookieHeader string) map[string]string {
@@ -262,6 +339,9 @@ func (h *Handler) handleGetComments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -303,6 +383,9 @@ func (h *Handler) handlePostComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAcknowledgeComment(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -346,9 +429,7 @@ func (h *Handler) handleAcknowledgeComment(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *Handler) handleReplyComment(w http.ResponseWriter, r *http.Request) {
-	isLocal := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:")
-	if !isLocal && !h.sessionOK(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -400,9 +481,7 @@ func (h *Handler) handleReplyComment(w http.ResponseWriter, r *http.Request) {
 // handleAddReply appends a user reply to the replies[] array of a comment identified by ts.
 // Any authenticated user (session or local) may reply; this is a peer thread, not a Claude reply.
 func (h *Handler) handleAddReply(w http.ResponseWriter, r *http.Request) {
-	isLocal := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:")
-	if !isLocal && !h.sessionOK(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -461,8 +540,10 @@ func (h *Handler) handleAddReply(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteComment removes a comment (and its entire thread) by ts.
 func (h *Handler) handleDeleteComment(w http.ResponseWriter, r *http.Request) {
-	if !h.sessionOK(r) && !strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	// This previously exempted loopback callers. The server runs behind nginx
+	// proxying to 127.0.0.1, so RemoteAddr is loopback for every internet
+	// request and the exemption admitted everyone.
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -535,6 +616,9 @@ func (h *Handler) handleListFolders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -570,6 +654,9 @@ func (h *Handler) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -598,6 +685,9 @@ func (h *Handler) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleRenameFolder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -641,6 +731,9 @@ func (h *Handler) handleRenameFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleMoveFolder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -704,6 +797,9 @@ func (h *Handler) handleMoveFolder(w http.ResponseWriter, r *http.Request) {
 // ── doc management ─────────────────────────────────────────────────────────
 
 func (h *Handler) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -734,6 +830,9 @@ func (h *Handler) handleDeleteDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleRenameDoc(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -781,6 +880,9 @@ func (h *Handler) handleRenameDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -836,8 +938,7 @@ func (h *Handler) handleMoveDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReindex(w http.ResponseWriter, r *http.Request) {
-	if !h.apiWriteAllowed(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	go docgen.ReindexAll(h.dgCfg)
@@ -845,8 +946,7 @@ func (h *Handler) handleReindex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
-	if !h.apiWriteAllowed(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -888,8 +988,7 @@ func (h *Handler) handleCreateDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
-	if !h.apiWriteAllowed(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -935,6 +1034,9 @@ func (h *Handler) handleUpdateDoc(w http.ResponseWriter, r *http.Request) {
 // ── session endpoints ──────────────────────────────────────────────────────
 
 func (h *Handler) handleExcludeSession(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -952,6 +1054,9 @@ func (h *Handler) handleExcludeSession(w http.ResponseWriter, r *http.Request) {
 var uuidRe = regexp.MustCompile(`^[0-9a-f\-]{36}$`)
 
 func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	body, err := readBody(r)
 	if err != nil {
 		sendJSON(w, 400, map[string]any{"error": "invalid JSON"})
@@ -1125,6 +1230,9 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 // ── upload ─────────────────────────────────────────────────────────────────
 
 func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	ct := r.Header.Get("Content-Type")
 	if !strings.Contains(ct, "multipart/form-data") {
 		sendJSON(w, 400, map[string]any{"error": "multipart/form-data required"})
@@ -1178,6 +1286,9 @@ func (h *Handler) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOwner(w, r) {
+		return
+	}
 	ct := r.Header.Get("Content-Type")
 	if !strings.Contains(ct, "multipart/form-data") {
 		sendJSON(w, 400, map[string]any{"error": "multipart/form-data required"})
@@ -1380,8 +1491,7 @@ func (h *Handler) handleShareCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleShareCreate(w http.ResponseWriter, r *http.Request) {
-	if !h.apiWriteAllowed(r) {
-		sendJSON(w, 401, map[string]any{"error": "not authenticated"})
+	if !h.requireOwner(w, r) {
 		return
 	}
 	body, err := readBody(r)
@@ -1550,9 +1660,17 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, path strin
 	// Resolve path to file
 	var parts []string
 	for _, seg := range strings.Split(path, "/") {
-		if seg != "" && seg != ".." {
-			parts = append(parts, seg)
+		if seg == "" || seg == ".." {
+			continue
 		}
+		// Nothing dot-prefixed is ever a document. Refusing the whole class
+		// keeps metadata — a stray .git, an editor backup, a dotfile dropped in
+		// the tree by a tool — from being served as content.
+		if strings.HasPrefix(seg, ".") {
+			w.WriteHeader(404)
+			return
+		}
+		parts = append(parts, seg)
 	}
 	var fp string
 	if len(parts) == 0 {
