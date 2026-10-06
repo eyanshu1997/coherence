@@ -101,7 +101,9 @@ func (h *Handler) sourceAt(rel, rev string) (string, bool, error) {
 		if strings.EqualFold(rv.Rev, rev) || rv.Short == strings.ToLower(rev) {
 			blob, err := h.ver.FileAt(rv.Rev, rv.Path)
 			if err != nil {
-				return "", false, err
+				// The revision is listed but its blob will not read — treat it
+				// as missing rather than as a server fault.
+				return "", false, os.ErrNotExist
 			}
 			if md, ok := docgen.ExtractRawMarkdown(blob); ok {
 				return md, true, nil

@@ -255,3 +255,36 @@ func TestNilStoreIsInert(t *testing.T) {
 		t.Error("History on a nil store should error")
 	}
 }
+
+// A deleted document stays recoverable: the commit that removed it carries no
+// blob, so history must end at its last real content instead of offering a
+// revision that cannot be read or restored.
+func TestHistoryExcludesDeletionCommits(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/doomed.html", "the content that must survive deletion\n")
+	if err := s.CommitNow("create"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(work, "proj/doomed.html")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitNow("delete"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs, err := s.History("proj/doomed.html", 10)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(revs) != 1 {
+		t.Fatalf("expected only the content revision, got %d: %+v", len(revs), revs)
+	}
+	// The newest listed revision must be readable, which is the whole point.
+	got, err := s.FileAt(revs[0].Rev, revs[0].Path)
+	if err != nil {
+		t.Fatalf("the newest listed revision of a deleted doc must be readable: %v", err)
+	}
+	if !strings.Contains(string(got), "must survive") {
+		t.Errorf("unexpected recovered content: %q", got)
+	}
+}

@@ -379,7 +379,12 @@ func (s *Store) History(relPath string, limit int) ([]Revision, error) {
 	// --name-only with a pathspec reports the path as it was named in each
 	// commit, which is what FileAt needs across renames. \x00 delimits commits
 	// and \x1f the metadata fields, neither of which can occur in the values.
-	out, err := s.run("log", "--follow", "-n", strconv.Itoa(limit),
+	//
+	// --diff-filter=d (lowercase: exclude) drops commits that deleted the file.
+	// Those carry no blob, so listing them would offer a version that cannot be
+	// read or restored. Excluding them also means a deleted document's history
+	// still ends at its last real content, which is what makes it recoverable.
+	out, err := s.run("log", "--follow", "--diff-filter=d", "-n", strconv.Itoa(limit),
 		"--format=%x00%H%x1f%at%x1f%s%x1f%an", "--name-only", "--", relPath)
 	if err != nil {
 		// A document with no snapshot yet is not an error.
