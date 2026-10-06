@@ -1446,3 +1446,142 @@ table.dash-sortable th[data-col]:hover { color: var(--accent); }
   margin-bottom: 2px;
   display: block;
 }
+
+/* ── Version history ── */
+.history-doc-btn { flex-shrink: 0; background: var(--surface); border: 1px solid var(--border); color: var(--text3); font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: var(--radius); cursor: pointer; font-family: var(--font); transition: background 0.12s, color 0.12s; margin-left: 8px; }
+.history-doc-btn:hover { background: var(--surface2); color: var(--text2); }
+
+body.doc-history-mode .sidebar,
+body.doc-history-mode .doc-header,
+body.doc-history-mode .content,
+body.doc-history-mode .comments-section,
+body.doc-history-mode .doc-footer,
+body.doc-history-mode #sel-chip,
+body.doc-history-mode #sel-popover,
+body.doc-history-mode .print-doc-btn,
+body.doc-history-mode .edit-doc-btn,
+body.doc-history-mode .share-btn,
+body.doc-history-mode #share-popover { display: none !important; }
+
+body.doc-history-mode .page { display: block; }
+body.doc-history-mode .main { padding: 0; max-width: 100%; }
+
+#history-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+#doc-history-pane {
+  display: flex;
+  height: calc(100vh - 56px);
+  background: var(--bg);
+}
+
+.hist-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.hist-sidebar-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.hist-list { overflow-y: auto; flex: 1; }
+
+.hist-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid transparent;
+  padding: 9px 16px;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: background 0.12s;
+}
+.hist-row:hover { background: var(--surface2); }
+.hist-row.active { background: var(--accent-dim); border-left-color: var(--accent); }
+.hist-row-date { font-size: 12px; font-weight: 600; color: var(--text); }
+.hist-row-subject {
+  font-size: 11px;
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+.hist-row-meta { font-size: 10px; color: var(--text3); font-family: var(--font-mono); opacity: 0.8; }
+.hist-latest {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-ring);
+  border-radius: 10px;
+  padding: 0 5px;
+  margin-left: 4px;
+  vertical-align: 1px;
+}
+
+.hist-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.hist-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.hist-tabs { display: flex; gap: 6px; }
+.hist-tab {
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text3);
+  cursor: pointer;
+  font-family: var(--font);
+}
+.hist-tab:hover { background: var(--surface2); color: var(--text2); }
+.hist-tab.active { background: var(--accent-dim); border-color: var(--accent-ring); color: var(--accent); font-weight: 600; }
+.hist-selected-label { font-size: 11px; color: var(--text3); font-family: var(--font-mono); }
+
+.hist-body { flex: 1; overflow: auto; background: var(--bg); }
+.hist-empty { padding: 24px 20px; font-size: 13px; color: var(--text3); line-height: 1.6; }
+.hist-err { color: var(--red); }
+
+.hist-source {
+  margin: 0;
+  padding: 16px 20px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.hist-diff { padding: 10px 0; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; }
+.hist-diff .dl { padding: 0 20px; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.hist-diff .dl-add  { background: var(--green-dim); color: var(--green); }
+.hist-diff .dl-del  { background: var(--red-dim);   color: var(--red); }
+.hist-diff .dl-hunk { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.hist-diff .dl-file,
+.hist-diff .dl-meta { color: var(--text3); opacity: 0.75; }

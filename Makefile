@@ -1,7 +1,9 @@
 SHELL := /bin/bash
 COHERENCE_HOME := $(shell pwd)
 BIN_DIR := $(COHERENCE_HOME)/bin
-ASSET_VER := v30
+# Must track the AssetVer default in internal/docgen/templates.go — the ldflags
+# override below wins, so a stale value here silently serves cached JS/CSS.
+ASSET_VER := v45
 
 .PHONY: build test test-unit test-e2e clean generate-golden
 

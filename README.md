@@ -223,6 +223,52 @@ coherence/
 | Doc auth + comments | `coherence-doc set-password` | Auth disabled, comments still work locally |
 | Jira auto-linking | `JIRA_BASE_URL` in `.env` | Skipped |
 | GitHub PR auto-linking | `GITHUB_ORG` in `.env` | Skipped |
+| Version history (diff + restore) | `git` on `PATH` | Disabled; docs still generate |
+
+---
+
+## Version History
+
+Every write to the doc tree is snapshotted into a git repository at
+`~/.coherence/versions.git`. The **History** button on any doc page lists its
+past versions, shows a unified diff against the current text, and restores one.
+
+The repository lives **outside** `~/.coherence/data` on purpose. Everything under
+the data dir is reachable over HTTP, and history retains documents that were
+deliberately deleted, so a repository inside it would let any reader reconstruct
+them. The server refuses to enable versioning if the two paths overlap.
+
+What is snapshotted is the generated HTML — which is also the source, since every
+doc embeds its own markdown in a `doc-raw-markdown` script tag. Diffs and restores
+operate on that extracted markdown, because a diff of rendered markup is
+unreadable. `index.html` files, `*.log` and `*.jsonl` are excluded: indexes are
+regenerated on every write, and logs are large and reproducible from their source.
+
+**Restore is not a revert.** The old markdown is re-rendered through the normal
+generator and lands as a new snapshot on top, after the state being replaced is
+committed first. Nothing is rewritten and nothing becomes unreachable.
+
+Writes are debounced (60s by default) and committed by a single serialized
+worker, because the editor autosaves every 2s and several handlers reindex the
+tree from a goroutine.
+
+```bash
+# inspect history directly
+git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data log --oneline
+git --git-dir=~/.coherence/versions.git --work-tree=~/.coherence/data \
+    log --follow -- valtix-sw/VAL-12345/analysis.html
+```
+
+### API
+
+All endpoints are owner-gated (API key, or an allowlisted identity).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/doc-history?folder=F&file=S` | List snapshots for a doc, newest first |
+| GET | `/doc-version?folder=F&file=S&rev=R` | Markdown source at one revision |
+| GET | `/doc-diff?folder=F&file=S&rev=R[&to=R2]` | Unified diff vs current, or vs another revision |
+| POST | `/restore-doc` | `{folder, file, rev}` — re-render a revision as a new version |
 
 ---
 
