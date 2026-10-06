@@ -244,6 +244,16 @@ operate on that extracted markdown, because a diff of rendered markup is
 unreadable. `index.html` files, `*.log` and `*.jsonl` are excluded: indexes are
 regenerated on every write, and logs are large and reproducible from their source.
 
+Renames and moves are followed, but the attribution is validated rather than
+trusted. Rename detection is a content-similarity guess, and every generated doc
+shares the whole HTML template, so two unrelated short docs are ~98% alike —
+git will report a brand-new doc as a rename of whichever doc it resembles. The
+discriminator is existence, not similarity: a real rename means the old path is
+gone from the current tree, so a path change is accepted only when that path no
+longer exists in `HEAD`. If a doc is renamed `A`→`B` and a new doc later takes
+`A`, `B`'s history stops at the rename rather than reaching into the new
+occupant.
+
 **Restore is not a revert.** The old markdown is re-rendered through the normal
 generator and lands as a new snapshot on top, after the state being replaced is
 committed first. Nothing is rewritten and nothing becomes unreachable.

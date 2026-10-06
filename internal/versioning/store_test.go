@@ -353,3 +353,76 @@ func TestRunPeriodicZeroIntervalIsNoop(t *testing.T) {
 		t.Error("RunPeriodic with a zero interval should return immediately")
 	}
 }
+
+// --follow attributes a new file to whichever existing file it resembles, and
+// for generated docs that resemblance is near-total. History must not offer
+// another document's revision, since restore would write it over the real one.
+func TestHistoryRejectsFalseRenameFromLiveDoc(t *testing.T) {
+	s, work := newStore(t)
+	// Two docs sharing a large boilerplate block, as generated docs do.
+	boiler := strings.Repeat("<!-- shared template line -->\n", 200)
+	writeDoc(t, work, "proj/original.html", boiler+"<p>the original body</p>\n")
+	if err := s.CommitNow("create original"); err != nil {
+		t.Fatal(err)
+	}
+	writeDoc(t, work, "proj/newcomer.html", boiler+"<p>a different body</p>\n")
+	if err := s.CommitNow("create newcomer"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs, err := s.History("proj/newcomer.html", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revs) != 1 {
+		t.Fatalf("newcomer should have one revision of its own, got %d: %+v", len(revs), revs)
+	}
+	for _, rv := range revs {
+		if rv.Path != "proj/newcomer.html" {
+			t.Errorf("history attributed to another document: %q", rv.Path)
+		}
+		blob, err := s.FileAt(rv.Rev, rv.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(blob), "a different body") {
+			t.Errorf("revision holds another document's content: %q", blob)
+		}
+	}
+}
+
+// Fails safe: when a doc is renamed and a new doc later takes the old path,
+// history stops at the rename rather than reaching back through the new
+// occupant of that path.
+func TestHistoryTruncatesWhenOldPathIsReoccupied(t *testing.T) {
+	s, work := newStore(t)
+	writeDoc(t, work, "proj/a.html", "content of the doc that gets renamed\n")
+	if err := s.CommitNow("create a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(work, "proj/a.html"), filepath.Join(work, "proj/b.html")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitNow("rename a to b"); err != nil {
+		t.Fatal(err)
+	}
+	// Before the reoccupation, the rename is followed.
+	if revs, err := s.History("proj/b.html", 10); err != nil || len(revs) != 2 {
+		t.Fatalf("expected the rename to be followed (2 revisions), got %d (err %v)", len(revs), err)
+	}
+
+	writeDoc(t, work, "proj/a.html", "an unrelated new doc now living at the old path\n")
+	if err := s.CommitNow("new doc at a"); err != nil {
+		t.Fatal(err)
+	}
+
+	revs, err := s.History("proj/b.html", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rv := range revs {
+		if rv.Path != "proj/b.html" {
+			t.Errorf("history reached into the reoccupied path %q", rv.Path)
+		}
+	}
+}
